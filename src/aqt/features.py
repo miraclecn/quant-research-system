@@ -420,30 +420,31 @@ def build_factor_registry(features: list[str] | None = None) -> pd.DataFrame:
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     g = out.groupby("symbol", group_keys=False, observed=True)
+    features: dict[str, pd.Series] = {}
 
-    out["ret_1"] = g["close"].pct_change(1)
-    out["ret_3"] = g["close"].pct_change(3)
-    out["ret_5"] = g["close"].pct_change(5)
-    out["ret_10"] = g["close"].pct_change(10)
-    out["ret_20"] = g["close"].pct_change(20)
-    out["ret_60"] = g["close"].pct_change(60)
+    features["ret_1"] = g["close"].pct_change(1)
+    features["ret_3"] = g["close"].pct_change(3)
+    features["ret_5"] = g["close"].pct_change(5)
+    features["ret_10"] = g["close"].pct_change(10)
+    features["ret_20"] = g["close"].pct_change(20)
+    features["ret_60"] = g["close"].pct_change(60)
 
     daily_ret = g["close"].pct_change()
-    out["vol_10"] = daily_ret.groupby(out["symbol"], observed=True).rolling(10).std().reset_index(level=0, drop=True)
-    out["vol_20"] = daily_ret.groupby(out["symbol"], observed=True).rolling(20).std().reset_index(level=0, drop=True)
+    features["vol_10"] = daily_ret.groupby(out["symbol"], observed=True).rolling(10).std().reset_index(level=0, drop=True)
+    features["vol_20"] = daily_ret.groupby(out["symbol"], observed=True).rolling(20).std().reset_index(level=0, drop=True)
     vol_60 = daily_ret.groupby(out["symbol"], observed=True).rolling(60).std().reset_index(level=0, drop=True)
 
-    out["amp_5"] = (g["high"].rolling(5).max().reset_index(level=0, drop=True) /
-                    g["low"].rolling(5).min().reset_index(level=0, drop=True) - 1.0)
-    out["amp_20"] = (g["high"].rolling(20).max().reset_index(level=0, drop=True) /
-                     g["low"].rolling(20).min().reset_index(level=0, drop=True) - 1.0)
+    features["amp_5"] = (g["high"].rolling(5).max().reset_index(level=0, drop=True) /
+                         g["low"].rolling(5).min().reset_index(level=0, drop=True) - 1.0)
+    features["amp_20"] = (g["high"].rolling(20).max().reset_index(level=0, drop=True) /
+                          g["low"].rolling(20).min().reset_index(level=0, drop=True) - 1.0)
 
-    out["turnover_5"] = g["turnover_rate"].rolling(5).mean().reset_index(level=0, drop=True)
-    out["turnover_20"] = g["turnover_rate"].rolling(20).mean().reset_index(level=0, drop=True)
+    features["turnover_5"] = g["turnover_rate"].rolling(5).mean().reset_index(level=0, drop=True)
+    features["turnover_20"] = g["turnover_rate"].rolling(20).mean().reset_index(level=0, drop=True)
     amount_ma_5 = g["amount"].rolling(5).mean().reset_index(level=0, drop=True)
     amount_ma_20 = g["amount"].rolling(20).mean().reset_index(level=0, drop=True)
-    out["amount_ratio_5_20"] = amount_ma_5 / amount_ma_20.replace(0, np.nan)
-    out["amount_ratio_1_20"] = out["amount"] / amount_ma_20.replace(0, np.nan) - 1.0
+    features["amount_ratio_5_20"] = amount_ma_5 / amount_ma_20.replace(0, np.nan)
+    features["amount_ratio_1_20"] = out["amount"] / amount_ma_20.replace(0, np.nan) - 1.0
 
     ma_5 = g["close"].rolling(5).mean().reset_index(level=0, drop=True)
     ma_8 = g["close"].rolling(8).mean().reset_index(level=0, drop=True)
@@ -462,49 +463,49 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     close_std_20 = g["close"].rolling(20).std().reset_index(level=0, drop=True)
     close_std_60 = g["close"].rolling(60).std().reset_index(level=0, drop=True)
     close_std_120 = g["close"].rolling(120).std().reset_index(level=0, drop=True)
-    out["close_to_ma_5"] = out["close"] / ma_5 - 1.0
-    out["close_to_ma_8"] = out["close"] / ma_8 - 1.0
-    out["close_to_ma_10"] = out["close"] / ma_10 - 1.0
-    out["close_to_ma_13"] = out["close"] / ma_13 - 1.0
-    out["close_to_ma_16"] = out["close"] / ma_16 - 1.0
-    out["close_to_ma_20"] = out["close"] / ma_20 - 1.0
-    out["close_to_ma_21"] = out["close"] / ma_21 - 1.0
-    out["close_to_ma_32"] = out["close"] / ma_32 - 1.0
-    out["close_to_ma_34"] = out["close"] / ma_34 - 1.0
-    out["close_to_ma_55"] = out["close"] / ma_55 - 1.0
-    out["close_to_ma_60"] = out["close"] / ma_60 - 1.0
-    out["close_to_ma_89"] = out["close"] / ma_89 - 1.0
-    out["close_to_ma_120"] = out["close"] / ma_120 - 1.0
+    features["close_to_ma_5"] = out["close"] / ma_5 - 1.0
+    features["close_to_ma_8"] = out["close"] / ma_8 - 1.0
+    features["close_to_ma_10"] = out["close"] / ma_10 - 1.0
+    features["close_to_ma_13"] = out["close"] / ma_13 - 1.0
+    features["close_to_ma_16"] = out["close"] / ma_16 - 1.0
+    features["close_to_ma_20"] = out["close"] / ma_20 - 1.0
+    features["close_to_ma_21"] = out["close"] / ma_21 - 1.0
+    features["close_to_ma_32"] = out["close"] / ma_32 - 1.0
+    features["close_to_ma_34"] = out["close"] / ma_34 - 1.0
+    features["close_to_ma_55"] = out["close"] / ma_55 - 1.0
+    features["close_to_ma_60"] = out["close"] / ma_60 - 1.0
+    features["close_to_ma_89"] = out["close"] / ma_89 - 1.0
+    features["close_to_ma_120"] = out["close"] / ma_120 - 1.0
 
     prev_close = g["close"].shift(1)
-    out["gap_1"] = out["open"] / prev_close.replace(0, np.nan) - 1.0
-    out["intraday_ret_1"] = out["close"] / out["open"].replace(0, np.nan) - 1.0
-    out["overnight_ret_5"] = out["gap_1"].groupby(out["symbol"], observed=True).rolling(5).mean().reset_index(level=0, drop=True)
-    out["trend_5_20"] = ma_5 / ma_20.replace(0, np.nan) - 1.0
-    out["trend_5_13"] = ma_5 / ma_13.replace(0, np.nan) - 1.0
-    out["trend_8_16"] = ma_8 / ma_16.replace(0, np.nan) - 1.0
-    out["trend_8_21"] = ma_8 / ma_21.replace(0, np.nan) - 1.0
-    out["trend_10_20"] = ma_10 / ma_20.replace(0, np.nan) - 1.0
-    out["trend_5_34"] = ma_5 / ma_34.replace(0, np.nan) - 1.0
-    out["trend_13_34"] = ma_13 / ma_34.replace(0, np.nan) - 1.0
-    out["trend_13_55"] = ma_13 / ma_55.replace(0, np.nan) - 1.0
-    out["trend_16_48"] = ma_16 / ma_48.replace(0, np.nan) - 1.0
-    out["trend_20_60"] = ma_20 / ma_60.replace(0, np.nan) - 1.0
-    out["trend_20_120"] = ma_20 / ma_120.replace(0, np.nan) - 1.0
-    out["trend_21_55"] = ma_21 / ma_55.replace(0, np.nan) - 1.0
-    out["trend_34_89"] = ma_34 / ma_89.replace(0, np.nan) - 1.0
-    out["trend_55_120"] = ma_55 / ma_120.replace(0, np.nan) - 1.0
-    out["ma_spread_5_20_60"] = (ma_5 - ma_20) / ma_60.replace(0, np.nan)
-    out["ma_spread_5_34_89"] = (ma_5 - ma_34) / ma_89.replace(0, np.nan)
-    out["ma_spread_8_21_55"] = (ma_8 - ma_21) / ma_55.replace(0, np.nan)
-    out["ma_spread_10_20_60"] = (ma_10 - ma_20) / ma_60.replace(0, np.nan)
-    out["ma_spread_13_34_89"] = (ma_13 - ma_34) / ma_89.replace(0, np.nan)
-    out["ma_spread_20_60_120"] = (ma_20 - ma_60) / ma_120.replace(0, np.nan)
-    out["vol_ratio_10_20"] = out["vol_10"] / out["vol_20"].replace(0, np.nan) - 1.0
+    features["gap_1"] = out["open"] / prev_close.replace(0, np.nan) - 1.0
+    features["intraday_ret_1"] = out["close"] / out["open"].replace(0, np.nan) - 1.0
+    features["overnight_ret_5"] = features["gap_1"].groupby(out["symbol"], observed=True).rolling(5).mean().reset_index(level=0, drop=True)
+    features["trend_5_20"] = ma_5 / ma_20.replace(0, np.nan) - 1.0
+    features["trend_5_13"] = ma_5 / ma_13.replace(0, np.nan) - 1.0
+    features["trend_8_16"] = ma_8 / ma_16.replace(0, np.nan) - 1.0
+    features["trend_8_21"] = ma_8 / ma_21.replace(0, np.nan) - 1.0
+    features["trend_10_20"] = ma_10 / ma_20.replace(0, np.nan) - 1.0
+    features["trend_5_34"] = ma_5 / ma_34.replace(0, np.nan) - 1.0
+    features["trend_13_34"] = ma_13 / ma_34.replace(0, np.nan) - 1.0
+    features["trend_13_55"] = ma_13 / ma_55.replace(0, np.nan) - 1.0
+    features["trend_16_48"] = ma_16 / ma_48.replace(0, np.nan) - 1.0
+    features["trend_20_60"] = ma_20 / ma_60.replace(0, np.nan) - 1.0
+    features["trend_20_120"] = ma_20 / ma_120.replace(0, np.nan) - 1.0
+    features["trend_21_55"] = ma_21 / ma_55.replace(0, np.nan) - 1.0
+    features["trend_34_89"] = ma_34 / ma_89.replace(0, np.nan) - 1.0
+    features["trend_55_120"] = ma_55 / ma_120.replace(0, np.nan) - 1.0
+    features["ma_spread_5_20_60"] = (ma_5 - ma_20) / ma_60.replace(0, np.nan)
+    features["ma_spread_5_34_89"] = (ma_5 - ma_34) / ma_89.replace(0, np.nan)
+    features["ma_spread_8_21_55"] = (ma_8 - ma_21) / ma_55.replace(0, np.nan)
+    features["ma_spread_10_20_60"] = (ma_10 - ma_20) / ma_60.replace(0, np.nan)
+    features["ma_spread_13_34_89"] = (ma_13 - ma_34) / ma_89.replace(0, np.nan)
+    features["ma_spread_20_60_120"] = (ma_20 - ma_60) / ma_120.replace(0, np.nan)
+    features["vol_ratio_10_20"] = features["vol_10"] / features["vol_20"].replace(0, np.nan) - 1.0
     vol_5 = daily_ret.groupby(out["symbol"], observed=True).rolling(5).std().reset_index(level=0, drop=True)
-    out["vol_ratio_5_20"] = vol_5 / out["vol_20"].replace(0, np.nan) - 1.0
-    out["vol_ratio_20_60"] = out["vol_20"] / vol_60.replace(0, np.nan) - 1.0
-    out["turnover_ratio_5_20"] = out["turnover_5"] / out["turnover_20"].replace(0, np.nan) - 1.0
+    features["vol_ratio_5_20"] = vol_5 / features["vol_20"].replace(0, np.nan) - 1.0
+    features["vol_ratio_20_60"] = features["vol_20"] / vol_60.replace(0, np.nan) - 1.0
+    features["turnover_ratio_5_20"] = features["turnover_5"] / features["turnover_20"].replace(0, np.nan) - 1.0
 
     rolling_high_16 = g["high"].rolling(16).max().reset_index(level=0, drop=True)
     rolling_low_16 = g["low"].rolling(16).min().reset_index(level=0, drop=True)
@@ -512,55 +513,55 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     rolling_high_20 = g["high"].rolling(20).max().reset_index(level=0, drop=True)
     rolling_low_20 = g["low"].rolling(20).min().reset_index(level=0, drop=True)
     channel_width_20 = (rolling_high_20 - rolling_low_20).replace(0, np.nan)
-    out["channel_pos_16"] = (out["close"] - rolling_low_16) / channel_width_16 - 0.5
-    out["channel_pos_20"] = (out["close"] - rolling_low_20) / channel_width_20 - 0.5
-    out["close_to_high_16"] = out["close"] / rolling_high_16.replace(0, np.nan) - 1.0
-    out["close_to_high_20"] = out["close"] / rolling_high_20.replace(0, np.nan) - 1.0
-    out["close_to_low_16"] = out["close"] / rolling_low_16.replace(0, np.nan) - 1.0
-    out["close_to_low_20"] = out["close"] / rolling_low_20.replace(0, np.nan) - 1.0
+    features["channel_pos_16"] = (out["close"] - rolling_low_16) / channel_width_16 - 0.5
+    features["channel_pos_20"] = (out["close"] - rolling_low_20) / channel_width_20 - 0.5
+    features["close_to_high_16"] = out["close"] / rolling_high_16.replace(0, np.nan) - 1.0
+    features["close_to_high_20"] = out["close"] / rolling_high_20.replace(0, np.nan) - 1.0
+    features["close_to_low_16"] = out["close"] / rolling_low_16.replace(0, np.nan) - 1.0
+    features["close_to_low_20"] = out["close"] / rolling_low_20.replace(0, np.nan) - 1.0
     rolling_high_60 = g["high"].rolling(60).max().reset_index(level=0, drop=True)
     rolling_low_60 = g["low"].rolling(60).min().reset_index(level=0, drop=True)
     rolling_high_120 = g["high"].rolling(120).max().reset_index(level=0, drop=True)
     rolling_low_120 = g["low"].rolling(120).min().reset_index(level=0, drop=True)
     channel_width_60 = (rolling_high_60 - rolling_low_60).replace(0, np.nan)
     channel_width_120 = (rolling_high_120 - rolling_low_120).replace(0, np.nan)
-    out["channel_pos_60"] = (out["close"] - rolling_low_60) / channel_width_60 - 0.5
-    out["channel_pos_120"] = (out["close"] - rolling_low_120) / channel_width_120 - 0.5
-    out["breakout_ratio_20"] = (out["close"] - rolling_low_20) / channel_width_20
-    out["breakout_ratio_60"] = (out["close"] - rolling_low_60) / channel_width_60
-    out["breakout_ratio_120"] = (out["close"] - rolling_low_120) / channel_width_120
-    out["distance_to_low_20"] = (out["close"] - rolling_low_20) / rolling_low_20.replace(0, np.nan)
-    out["distance_to_low_60"] = (out["close"] - rolling_low_60) / rolling_low_60.replace(0, np.nan)
-    out["distance_to_low_120"] = (out["close"] - rolling_low_120) / rolling_low_120.replace(0, np.nan)
-    out["distance_to_high_20"] = out["close"] / rolling_high_20.replace(0, np.nan) - 1.0
-    out["distance_to_high_60"] = out["close"] / rolling_high_60.replace(0, np.nan) - 1.0
-    out["distance_to_high_120"] = out["close"] / rolling_high_120.replace(0, np.nan) - 1.0
-    out["price_zscore_20"] = (out["close"] - ma_20) / close_std_20.replace(0, np.nan)
-    out["price_zscore_60"] = (out["close"] - ma_60) / close_std_60.replace(0, np.nan)
-    out["price_zscore_120"] = (out["close"] - ma_120) / close_std_120.replace(0, np.nan)
-    out["range_pct_1"] = (out["high"] - out["low"]) / out["close"].replace(0, np.nan)
-    out["vol_compress_5_20"] = -(out["vol_10"] / out["vol_20"].replace(0, np.nan) - 1.0).abs()
-    out["vol_compress_10_60"] = -(out["vol_10"] / vol_60.replace(0, np.nan) - 1.0).abs()
-    out["ret_reversal_5_20"] = out["ret_5"] - out["ret_20"]
-    out["ret_reversal_10_60"] = out["ret_10"] - out["ret_60"]
-    out["turnover_shock_1_20"] = out["turnover_rate"] / out["turnover_20"].replace(0, np.nan) - 1.0
+    features["channel_pos_60"] = (out["close"] - rolling_low_60) / channel_width_60 - 0.5
+    features["channel_pos_120"] = (out["close"] - rolling_low_120) / channel_width_120 - 0.5
+    features["breakout_ratio_20"] = (out["close"] - rolling_low_20) / channel_width_20
+    features["breakout_ratio_60"] = (out["close"] - rolling_low_60) / channel_width_60
+    features["breakout_ratio_120"] = (out["close"] - rolling_low_120) / channel_width_120
+    features["distance_to_low_20"] = (out["close"] - rolling_low_20) / rolling_low_20.replace(0, np.nan)
+    features["distance_to_low_60"] = (out["close"] - rolling_low_60) / rolling_low_60.replace(0, np.nan)
+    features["distance_to_low_120"] = (out["close"] - rolling_low_120) / rolling_low_120.replace(0, np.nan)
+    features["distance_to_high_20"] = out["close"] / rolling_high_20.replace(0, np.nan) - 1.0
+    features["distance_to_high_60"] = out["close"] / rolling_high_60.replace(0, np.nan) - 1.0
+    features["distance_to_high_120"] = out["close"] / rolling_high_120.replace(0, np.nan) - 1.0
+    features["price_zscore_20"] = (out["close"] - ma_20) / close_std_20.replace(0, np.nan)
+    features["price_zscore_60"] = (out["close"] - ma_60) / close_std_60.replace(0, np.nan)
+    features["price_zscore_120"] = (out["close"] - ma_120) / close_std_120.replace(0, np.nan)
+    features["range_pct_1"] = (out["high"] - out["low"]) / out["close"].replace(0, np.nan)
+    features["vol_compress_5_20"] = -(features["vol_10"] / features["vol_20"].replace(0, np.nan) - 1.0).abs()
+    features["vol_compress_10_60"] = -(features["vol_10"] / vol_60.replace(0, np.nan) - 1.0).abs()
+    features["ret_reversal_5_20"] = features["ret_5"] - features["ret_20"]
+    features["ret_reversal_10_60"] = features["ret_10"] - features["ret_60"]
+    features["turnover_shock_1_20"] = out["turnover_rate"] / features["turnover_20"].replace(0, np.nan) - 1.0
     turnover_60 = g["turnover_rate"].rolling(60).mean().reset_index(level=0, drop=True)
-    out["turnover_shock_5_60"] = out["turnover_5"] / turnover_60.replace(0, np.nan) - 1.0
-    out["turnover_ratio_5_60"] = out["turnover_5"] / turnover_60.replace(0, np.nan) - 1.0
-    out["turnover_ratio_20_60"] = out["turnover_20"] / turnover_60.replace(0, np.nan) - 1.0
-    out["price_volume_div_5"] = out["ret_5"] - (amount_ma_5 / amount_ma_20.replace(0, np.nan) - 1.0)
+    features["turnover_shock_5_60"] = features["turnover_5"] / turnover_60.replace(0, np.nan) - 1.0
+    features["turnover_ratio_5_60"] = features["turnover_5"] / turnover_60.replace(0, np.nan) - 1.0
+    features["turnover_ratio_20_60"] = features["turnover_20"] / turnover_60.replace(0, np.nan) - 1.0
+    features["price_volume_div_5"] = features["ret_5"] - (amount_ma_5 / amount_ma_20.replace(0, np.nan) - 1.0)
     amount_ma_60 = g["amount"].rolling(60).mean().reset_index(level=0, drop=True)
     amount_std_20 = g["amount"].rolling(20).std().reset_index(level=0, drop=True)
     amount_std_60 = g["amount"].rolling(60).std().reset_index(level=0, drop=True)
     turnover_std_20 = g["turnover_rate"].rolling(20).std().reset_index(level=0, drop=True)
     turnover_std_60 = g["turnover_rate"].rolling(60).std().reset_index(level=0, drop=True)
-    out["price_volume_div_20"] = out["ret_20"] - (amount_ma_20 / amount_ma_60.replace(0, np.nan) - 1.0)
-    out["rebound_from_low_20"] = out["close"] / rolling_low_20.replace(0, np.nan) - 1.0 - out["ret_20"]
-    out["amount_trend_5"] = amount_ma_5 / amount_ma_20.replace(0, np.nan) - 1.0
-    out["amount_zscore_20"] = (out["amount"] - amount_ma_20) / amount_std_20.replace(0, np.nan)
-    out["amount_zscore_60"] = (out["amount"] - amount_ma_60) / amount_std_60.replace(0, np.nan)
-    out["turnover_zscore_20"] = (out["turnover_rate"] - out["turnover_20"]) / turnover_std_20.replace(0, np.nan)
-    out["turnover_zscore_60"] = (out["turnover_rate"] - turnover_60) / turnover_std_60.replace(0, np.nan)
+    features["price_volume_div_20"] = features["ret_20"] - (amount_ma_20 / amount_ma_60.replace(0, np.nan) - 1.0)
+    features["rebound_from_low_20"] = out["close"] / rolling_low_20.replace(0, np.nan) - 1.0 - features["ret_20"]
+    features["amount_trend_5"] = amount_ma_5 / amount_ma_20.replace(0, np.nan) - 1.0
+    features["amount_zscore_20"] = (out["amount"] - amount_ma_20) / amount_std_20.replace(0, np.nan)
+    features["amount_zscore_60"] = (out["amount"] - amount_ma_60) / amount_std_60.replace(0, np.nan)
+    features["turnover_zscore_20"] = (out["turnover_rate"] - features["turnover_20"]) / turnover_std_20.replace(0, np.nan)
+    features["turnover_zscore_60"] = (out["turnover_rate"] - turnover_60) / turnover_std_60.replace(0, np.nan)
 
     true_range = pd.concat(
         [
@@ -573,52 +574,51 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     atr_14 = true_range.groupby(out["symbol"], observed=True).rolling(14).mean().reset_index(level=0, drop=True)
     atr_20 = true_range.groupby(out["symbol"], observed=True).rolling(20).mean().reset_index(level=0, drop=True)
     atr_60 = true_range.groupby(out["symbol"], observed=True).rolling(60).mean().reset_index(level=0, drop=True)
-    out["atr_14"] = atr_14 / out["close"].replace(0, np.nan)
-    out["atr_20"] = atr_20 / out["close"].replace(0, np.nan)
-    out["atr_ratio_14_60"] = atr_14 / atr_60.replace(0, np.nan) - 1.0
-    out["atr_ratio_20_60"] = atr_20 / atr_60.replace(0, np.nan) - 1.0
+    features["atr_14"] = atr_14 / out["close"].replace(0, np.nan)
+    features["atr_20"] = atr_20 / out["close"].replace(0, np.nan)
+    features["atr_ratio_14_60"] = atr_14 / atr_60.replace(0, np.nan) - 1.0
+    features["atr_ratio_20_60"] = atr_20 / atr_60.replace(0, np.nan) - 1.0
 
     abs_diff = g["close"].diff().abs()
     path_10 = abs_diff.groupby(out["symbol"], observed=True).rolling(10).sum().reset_index(level=0, drop=True)
     path_20 = abs_diff.groupby(out["symbol"], observed=True).rolling(20).sum().reset_index(level=0, drop=True)
     path_60 = abs_diff.groupby(out["symbol"], observed=True).rolling(60).sum().reset_index(level=0, drop=True)
-    out["efficiency_ratio_10"] = (out["close"] - g["close"].shift(10)).abs() / path_10.replace(0, np.nan)
-    out["efficiency_ratio_20"] = (out["close"] - g["close"].shift(20)).abs() / path_20.replace(0, np.nan)
-    out["efficiency_ratio_60"] = (out["close"] - g["close"].shift(60)).abs() / path_60.replace(0, np.nan)
+    features["efficiency_ratio_10"] = (out["close"] - g["close"].shift(10)).abs() / path_10.replace(0, np.nan)
+    features["efficiency_ratio_20"] = (out["close"] - g["close"].shift(20)).abs() / path_20.replace(0, np.nan)
+    features["efficiency_ratio_60"] = (out["close"] - g["close"].shift(60)).abs() / path_60.replace(0, np.nan)
 
-    out["float_mv_log"] = np.log(out["float_mv"].clip(lower=1.0))
+    features["float_mv_log"] = np.log(out["float_mv"].clip(lower=1.0))
 
     # Fundamental features are point-in-time fields already aligned in the panel.
-    out["value_earnings_yield"] = 1.0 / out["pe_ttm"].replace(0, np.nan)
-    out["value_book_to_price"] = 1.0 / out["pb"].replace(0, np.nan)
-    out["value_sales_yield"] = 1.0 / out["ps_ttm"].replace(0, np.nan)
-    out["value_dividend_yield"] = out["dv_ttm"]
+    features["value_earnings_yield"] = 1.0 / out["pe_ttm"].replace(0, np.nan)
+    features["value_book_to_price"] = 1.0 / out["pb"].replace(0, np.nan)
+    features["value_sales_yield"] = 1.0 / out["ps_ttm"].replace(0, np.nan)
+    features["value_dividend_yield"] = out["dv_ttm"]
 
-    out["quality_roe"] = out["roe"]
-    out["quality_roe_dt"] = out["roe_dt"]
-    out["quality_roa"] = out["roa"]
-    out["quality_roic"] = out["roic"]
-    out["quality_grossprofit_margin"] = out["grossprofit_margin"]
-    out["quality_netprofit_margin"] = out["netprofit_margin"]
-    out["quality_ocfps"] = out["ocfps"]
-    out["quality_cfps"] = out["cfps"]
-    out["quality_profit_dedt_to_mv"] = out["profit_dedt"] / out["float_mv"].replace(0, np.nan)
+    features["quality_roe"] = out["roe"]
+    features["quality_roe_dt"] = out["roe_dt"]
+    features["quality_roa"] = out["roa"]
+    features["quality_roic"] = out["roic"]
+    features["quality_grossprofit_margin"] = out["grossprofit_margin"]
+    features["quality_netprofit_margin"] = out["netprofit_margin"]
+    features["quality_ocfps"] = out["ocfps"]
+    features["quality_cfps"] = out["cfps"]
+    features["quality_profit_dedt_to_mv"] = out["profit_dedt"] / out["float_mv"].replace(0, np.nan)
 
-    out["leverage_debt_to_assets"] = -out["debt_to_assets"]
-    out["solvency_current_ratio"] = out["current_ratio"]
-    out["solvency_quick_ratio"] = out["quick_ratio"]
+    features["leverage_debt_to_assets"] = -out["debt_to_assets"]
+    features["solvency_current_ratio"] = out["current_ratio"]
+    features["solvency_quick_ratio"] = out["quick_ratio"]
 
-    out["growth_basic_eps_yoy"] = out["basic_eps_yoy"]
-    out["growth_dt_eps_yoy"] = out["dt_eps_yoy"]
-    out["growth_netprofit_yoy"] = out["netprofit_yoy"]
-    out["growth_dt_netprofit_yoy"] = out["dt_netprofit_yoy"]
-    out["growth_ocf_yoy"] = out["ocf_yoy"]
-    out["growth_revenue_yoy"] = out["tr_yoy"]
-    out["growth_operating_revenue_yoy"] = out["or_yoy"]
-    out["growth_q_sales_yoy"] = out["q_sales_yoy"]
-    out["growth_q_op_qoq"] = out["q_op_qoq"]
+    features["growth_basic_eps_yoy"] = out["basic_eps_yoy"]
+    features["growth_dt_eps_yoy"] = out["dt_eps_yoy"]
+    features["growth_netprofit_yoy"] = out["netprofit_yoy"]
+    features["growth_dt_netprofit_yoy"] = out["dt_netprofit_yoy"]
+    features["growth_ocf_yoy"] = out["ocf_yoy"]
+    features["growth_revenue_yoy"] = out["tr_yoy"]
+    features["growth_operating_revenue_yoy"] = out["or_yoy"]
+    features["growth_q_sales_yoy"] = out["q_sales_yoy"]
+    features["growth_q_op_qoq"] = out["q_op_qoq"]
 
-    for col in FEATURE_COLUMNS:
-        out[col] = out[col].astype("float32")
-
-    return out
+    feature_frame = pd.DataFrame(features, index=out.index)
+    feature_frame = feature_frame.astype("float32")
+    return pd.concat([out, feature_frame], axis=1)

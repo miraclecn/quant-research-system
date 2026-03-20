@@ -88,7 +88,7 @@ def _normalize_panel(df: pd.DataFrame) -> pd.DataFrame:
         "turnover_rate",
         "float_mv",
         "index_weight",
-    ]
+    ] + [col for col in FUNDAMENTAL_COLUMNS if col in df.columns]
     for col in float_cols:
         df[col] = df[col].astype("float32")
     df["listed_days"] = df["listed_days"].fillna(9999).astype("int32")
