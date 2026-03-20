@@ -13,7 +13,7 @@ TEST_MONTHS ?= 12
 STEP_MONTHS ?= 12
 LOOKBACK_DAYS ?= 7
 
-.PHONY: help install run research-run factor-chain single-factor family-sma family-reversal export-panel update-raw update-index-weight update-index-daily daily-research check-daily status snapshot summary
+.PHONY: help install run research-run factor-chain single-factor family-sma family-reversal export-panel update-raw update-index-weight update-index-daily daily-research check-daily status snapshot summary factor-registry-check
 
 help:
 	@printf '%s\n' \
@@ -33,7 +33,8 @@ help:
 	'  make check-daily          Check daily output health' \
 	'  make status               Show git status and recent commits' \
 	'  make snapshot             Show git and artifact snapshot' \
-	'  make summary              Generate docs/generated-summary.md'
+	'  make summary              Generate docs/generated-summary.md' \
+	'  make factor-registry-check Validate factor registry production metadata'
 
 install:
 	$(PYTHON) -m pip install -e .
@@ -100,3 +101,6 @@ snapshot:
 
 summary:
 	bash scripts/generate_summary.sh
+
+factor-registry-check:
+	$(PYTHON) scripts/check_factor_registry.py
