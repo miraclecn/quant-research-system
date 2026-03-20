@@ -123,12 +123,22 @@ def _read_csv_or_empty(path: Path) -> pd.DataFrame:
 def _build_factor_evaluation(
     annual_report: pd.DataFrame,
     registry: pd.DataFrame,
+    cfg: AppConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if annual_report.empty:
         raise ValueError("No annual single-factor reports were generated for evaluation.")
 
+    factor_eval_cfg = cfg.train.factor_eval
+    weights = factor_eval_cfg.weights
     year_count = int(annual_report["year"].nunique())
-    min_years_required = 1 if year_count <= 1 else max(2, min(4, year_count))
+    min_years_required = (
+        factor_eval_cfg.min_years_required_single_window
+        if year_count <= 1
+        else max(
+            factor_eval_cfg.min_years_required_multi_window,
+            min(factor_eval_cfg.max_years_required, year_count),
+        )
+    )
 
     stability = (
         annual_report.groupby("feature", observed=False)
@@ -179,33 +189,36 @@ def _build_factor_evaluation(
     evaluation["abs_mean_rank_ic_mean"] = evaluation["mean_rank_ic_mean"].abs()
     evaluation["abs_rank_ic_ir_mean"] = evaluation["rank_ic_ir_mean"].abs()
     evaluation["quality_score"] = (
-        0.30 * _safe_rank(evaluation["abs_rank_ic_ir_mean"], ascending=True)
-        + 0.20 * _safe_rank(evaluation["abs_mean_rank_ic_mean"], ascending=True)
-        + 0.15 * _safe_rank(evaluation["bucket_return_spearman_mean"], ascending=True)
-        + 0.15 * _safe_rank(evaluation["positive_top_bucket_excess_year_ratio"], ascending=True)
-        + 0.10 * _safe_rank(evaluation["latest_top_bucket_official_index_excess_annual_return_est"], ascending=True)
-        + 0.05 * _safe_rank(evaluation["monotonic_year_ratio"], ascending=True)
-        + 0.05 * _safe_rank(evaluation["positive_ic_year_ratio"], ascending=True)
-        - 0.10 * _safe_rank(evaluation["mean_rank_ic_std"], ascending=True)
+        weights.abs_rank_ic_ir_mean * _safe_rank(evaluation["abs_rank_ic_ir_mean"], ascending=True)
+        + weights.abs_mean_rank_ic_mean * _safe_rank(evaluation["abs_mean_rank_ic_mean"], ascending=True)
+        + weights.bucket_return_spearman_mean * _safe_rank(evaluation["bucket_return_spearman_mean"], ascending=True)
+        + weights.positive_top_bucket_excess_year_ratio * _safe_rank(evaluation["positive_top_bucket_excess_year_ratio"], ascending=True)
+        + weights.latest_top_bucket_official_index_excess_annual_return_est * _safe_rank(evaluation["latest_top_bucket_official_index_excess_annual_return_est"], ascending=True)
+        + weights.monotonic_year_ratio * _safe_rank(evaluation["monotonic_year_ratio"], ascending=True)
+        + weights.positive_ic_year_ratio * _safe_rank(evaluation["positive_ic_year_ratio"], ascending=True)
+        - weights.mean_rank_ic_std_penalty * _safe_rank(evaluation["mean_rank_ic_std"], ascending=True)
     )
     evaluation["quality_score"] = evaluation["quality_score"].fillna(0.0).round(6)
     evaluation["quality_tier"] = "watch"
-    evaluation.loc[evaluation["quality_score"] >= evaluation["quality_score"].quantile(0.80), "quality_tier"] = "core"
+    evaluation.loc[
+        evaluation["quality_score"] >= evaluation["quality_score"].quantile(factor_eval_cfg.core_quantile),
+        "quality_tier",
+    ] = "core"
     evaluation.loc[
         (evaluation["quality_tier"] == "watch")
-        & (evaluation["quality_score"] >= evaluation["quality_score"].quantile(0.50)),
+        & (evaluation["quality_score"] >= evaluation["quality_score"].quantile(factor_eval_cfg.candidate_quantile)),
         "quality_tier",
     ] = "candidate"
     evaluation["pass_single_factor_gate"] = (
         evaluation["years_covered"].fillna(0) >= min_years_required
     ) & (
-        evaluation["abs_rank_ic_ir_mean"].fillna(0.0) >= 0.10
+        evaluation["abs_rank_ic_ir_mean"].fillna(0.0) >= factor_eval_cfg.min_abs_rank_ic_ir
     ) & (
-        evaluation["bucket_return_spearman_mean"].fillna(0.0) >= 0.20
+        evaluation["bucket_return_spearman_mean"].fillna(0.0) >= factor_eval_cfg.min_bucket_return_spearman
     ) & (
-        evaluation["positive_top_bucket_excess_year_ratio"].fillna(0.0) >= 0.50
+        evaluation["positive_top_bucket_excess_year_ratio"].fillna(0.0) >= factor_eval_cfg.min_positive_top_bucket_excess_year_ratio
     ) & (
-        evaluation["latest_top_bucket_official_index_excess_annual_return_est"].fillna(-1.0) > 0.0
+        evaluation["latest_top_bucket_official_index_excess_annual_return_est"].fillna(-1.0) > factor_eval_cfg.min_latest_top_bucket_excess
     )
     evaluation = evaluation.sort_values(
         ["pass_single_factor_gate", "quality_score", "abs_rank_ic_ir_mean", "bucket_return_spearman_mean"],
@@ -773,7 +786,8 @@ def run_factor_chain_pipeline(
     factor_evaluation = pd.read_csv(factor_eval_dir / "factor_evaluation.csv")
     factor_whitelist = pd.read_csv(factor_eval_dir / "factor_whitelist.csv")
     if factor_whitelist.empty:
-        fallback_count = max(1, factor_top_k) if factor_top_k > 0 else min(20, len(factor_evaluation))
+        fallback_top_n = cfg.train.factor_eval.fallback_top_n
+        fallback_count = max(1, factor_top_k) if factor_top_k > 0 else min(fallback_top_n, len(factor_evaluation))
         factor_whitelist = factor_evaluation.head(fallback_count).copy()
         factor_whitelist["pass_single_factor_gate"] = False
         factor_whitelist["selected_reason"] = "fallback_top_quality_score"
@@ -1006,9 +1020,13 @@ def run_factor_chain_pipeline(
     split_count = max(1, len(split_ids))
     ridge_screen["selection_rate"] = ridge_screen["selection_rate"].fillna(0.0)
     ridge_screen["pass_ridge_gate"] = (
-        ridge_screen["selection_rate"] >= (0.5 if split_count > 1 else 1.0)
+        ridge_screen["selection_rate"] >= (
+            cfg.train.factor_eval.ridge_min_selection_rate_multi_split
+            if split_count > 1
+            else cfg.train.factor_eval.ridge_min_selection_rate_single_split
+        )
     ) & (
-        ridge_screen["ridge_original_coef_cv"].fillna(0.0) <= 1.5
+        ridge_screen["ridge_original_coef_cv"].fillna(0.0) <= cfg.train.factor_eval.ridge_max_original_coef_cv
     )
     if "ridge_original_abs_coef_mean" not in ridge_screen.columns:
         ridge_screen["ridge_original_abs_coef_mean"] = 0.0
@@ -1167,7 +1185,7 @@ def run_single_factor_pipeline(
         raise ValueError("No annual single-factor reports were generated for the requested window.")
 
     annual_report.to_csv(cfg.output_dir / "single_factor_annual_report.csv", index=False)
-    evaluation, whitelist = _build_factor_evaluation(annual_report=annual_report, registry=registry)
+    evaluation, whitelist = _build_factor_evaluation(annual_report=annual_report, registry=registry, cfg=cfg)
     evaluation.to_csv(cfg.output_dir / "factor_evaluation.csv", index=False)
     whitelist.to_csv(cfg.output_dir / "factor_whitelist.csv", index=False)
     evaluation.to_csv(cfg.output_dir / "single_factor_stability.csv", index=False)

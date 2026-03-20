@@ -91,6 +91,19 @@ This workflow is now organized as:
 - `ridge_screen.csv`: whitelist factors re-screened by rolling Ridge stability
 - `lgbm_feature_pool.csv`: final feature pool handed to LightGBM research
 
+Key evaluation knobs can now be tuned from the CLI, for example:
+
+```bash
+aqt single-factor-run \
+  --input data/daily_bars.parquet \
+  --output-dir outputs/factor-eval \
+  --research-start 2020-01-01 \
+  --research-end 2025-12-31 \
+  --factor-min-abs-rank-ic-ir 0.12 \
+  --factor-min-bucket-spearman 0.25 \
+  --factor-min-positive-top-bucket-excess-ratio 0.6
+```
+
 Recommended workflow when keeping DuckDB as the raw store:
 
 ```bash

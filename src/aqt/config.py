@@ -57,6 +57,37 @@ class TrainConfig:
     neutralize_scores: bool = False
     neutralize_industry: bool = True
     neutralize_size: bool = True
+    factor_eval: "FactorEvalConfig" = field(default_factory=lambda: FactorEvalConfig())
+
+
+@dataclass(slots=True)
+class FactorEvalWeights:
+    abs_rank_ic_ir_mean: float = 0.30
+    abs_mean_rank_ic_mean: float = 0.20
+    bucket_return_spearman_mean: float = 0.15
+    positive_top_bucket_excess_year_ratio: float = 0.15
+    latest_top_bucket_official_index_excess_annual_return_est: float = 0.10
+    monotonic_year_ratio: float = 0.05
+    positive_ic_year_ratio: float = 0.05
+    mean_rank_ic_std_penalty: float = 0.10
+
+
+@dataclass(slots=True)
+class FactorEvalConfig:
+    min_years_required_single_window: int = 1
+    min_years_required_multi_window: int = 2
+    max_years_required: int = 4
+    min_abs_rank_ic_ir: float = 0.10
+    min_bucket_return_spearman: float = 0.20
+    min_positive_top_bucket_excess_year_ratio: float = 0.50
+    min_latest_top_bucket_excess: float = 0.0
+    core_quantile: float = 0.80
+    candidate_quantile: float = 0.50
+    fallback_top_n: int = 20
+    ridge_min_selection_rate_multi_split: float = 0.50
+    ridge_min_selection_rate_single_split: float = 1.0
+    ridge_max_original_coef_cv: float = 1.5
+    weights: FactorEvalWeights = field(default_factory=FactorEvalWeights)
 
 
 @dataclass(slots=True)

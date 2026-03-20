@@ -58,6 +58,16 @@ def main() -> None:
     parser.add_argument("--factor-top-k", type=int, default=10, help="Number of features kept after train-period single-factor screening")
     parser.add_argument("--factor-min-rank-ic", type=float, default=0.0, help="Minimum absolute train-period mean_rank_ic for feature selection")
     parser.add_argument("--factor-max-corr", type=float, default=0.9, help="Maximum absolute train-period pairwise correlation allowed among selected features")
+    parser.add_argument("--factor-min-abs-rank-ic-ir", type=float, help="Minimum absolute mean rank ICIR for passing the single-factor gate")
+    parser.add_argument("--factor-min-bucket-spearman", type=float, help="Minimum mean bucket Spearman for passing the single-factor gate")
+    parser.add_argument("--factor-min-positive-top-bucket-excess-ratio", type=float, help="Minimum positive-year ratio of top-bucket benchmark excess")
+    parser.add_argument("--factor-min-latest-top-bucket-excess", type=float, help="Minimum latest-year top-bucket official index excess annual return")
+    parser.add_argument("--factor-core-quantile", type=float, help="Quantile threshold for tagging factors as core")
+    parser.add_argument("--factor-candidate-quantile", type=float, help="Quantile threshold for tagging factors as candidate")
+    parser.add_argument("--factor-fallback-top-n", type=int, help="Fallback number of top quality-score factors used when whitelist is empty")
+    parser.add_argument("--ridge-min-selection-rate-multi-split", type=float, help="Minimum Ridge selection rate when there are multiple rolling splits")
+    parser.add_argument("--ridge-min-selection-rate-single-split", type=float, help="Minimum Ridge selection rate when there is only one split")
+    parser.add_argument("--ridge-max-original-coef-cv", type=float, help="Maximum Ridge original coefficient CV for passing the Ridge gate")
     parser.add_argument("--bucket-count", type=int, default=5, choices=[5, 10], help="Bucket count for single-factor group analysis")
     parser.add_argument("--single-factor-top-k", type=int, default=20, help="Number of top-ranked factors to export detailed single-factor reports for")
     parser.add_argument("--family", choices=["sma", "reversal"], help="Factor family name for family-lab")
@@ -107,6 +117,26 @@ def main() -> None:
         cfg.train.lgbm.reg_lambda = args.lgbm_reg_lambda
     if args.lgbm_rank_bins is not None:
         cfg.train.lgbm.rank_bins = args.lgbm_rank_bins
+    if args.factor_min_abs_rank_ic_ir is not None:
+        cfg.train.factor_eval.min_abs_rank_ic_ir = args.factor_min_abs_rank_ic_ir
+    if args.factor_min_bucket_spearman is not None:
+        cfg.train.factor_eval.min_bucket_return_spearman = args.factor_min_bucket_spearman
+    if args.factor_min_positive_top_bucket_excess_ratio is not None:
+        cfg.train.factor_eval.min_positive_top_bucket_excess_year_ratio = args.factor_min_positive_top_bucket_excess_ratio
+    if args.factor_min_latest_top_bucket_excess is not None:
+        cfg.train.factor_eval.min_latest_top_bucket_excess = args.factor_min_latest_top_bucket_excess
+    if args.factor_core_quantile is not None:
+        cfg.train.factor_eval.core_quantile = args.factor_core_quantile
+    if args.factor_candidate_quantile is not None:
+        cfg.train.factor_eval.candidate_quantile = args.factor_candidate_quantile
+    if args.factor_fallback_top_n is not None:
+        cfg.train.factor_eval.fallback_top_n = args.factor_fallback_top_n
+    if args.ridge_min_selection_rate_multi_split is not None:
+        cfg.train.factor_eval.ridge_min_selection_rate_multi_split = args.ridge_min_selection_rate_multi_split
+    if args.ridge_min_selection_rate_single_split is not None:
+        cfg.train.factor_eval.ridge_min_selection_rate_single_split = args.ridge_min_selection_rate_single_split
+    if args.ridge_max_original_coef_cv is not None:
+        cfg.train.factor_eval.ridge_max_original_coef_cv = args.ridge_max_original_coef_cv
     if args.neutralize_scores:
         cfg.train.neutralize_scores = True
     if args.no_neutralize_industry:
