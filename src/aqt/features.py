@@ -22,6 +22,34 @@ BREAKOUT_WINDOWS = [20, 60, 120]
 AMOUNT_ZSCORE_WINDOWS = [20, 60]
 TURNOVER_ZSCORE_WINDOWS = [20, 60]
 
+FUNDAMENTAL_FEATURE_COLUMNS = [
+    "value_earnings_yield",
+    "value_book_to_price",
+    "value_sales_yield",
+    "value_dividend_yield",
+    "quality_roe",
+    "quality_roe_dt",
+    "quality_roa",
+    "quality_roic",
+    "quality_grossprofit_margin",
+    "quality_netprofit_margin",
+    "quality_ocfps",
+    "quality_cfps",
+    "quality_profit_dedt_to_mv",
+    "leverage_debt_to_assets",
+    "solvency_current_ratio",
+    "solvency_quick_ratio",
+    "growth_basic_eps_yoy",
+    "growth_dt_eps_yoy",
+    "growth_netprofit_yoy",
+    "growth_dt_netprofit_yoy",
+    "growth_ocf_yoy",
+    "growth_revenue_yoy",
+    "growth_operating_revenue_yoy",
+    "growth_q_sales_yoy",
+    "growth_q_op_qoq",
+]
+
 
 BASE_FEATURE_COLUMNS = [
     "ret_1",
@@ -102,10 +130,18 @@ EXTENDED_FEATURE_COLUMNS = [
     *[f"turnover_zscore_{window}" for window in TURNOVER_ZSCORE_WINDOWS],
 ]
 
-FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + EXTENDED_FEATURE_COLUMNS
+FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + EXTENDED_FEATURE_COLUMNS + FUNDAMENTAL_FEATURE_COLUMNS
 
 
 def _infer_factor_family(feature: str) -> str:
+    if feature.startswith("value_"):
+        return "value"
+    if feature.startswith("quality_"):
+        return "quality"
+    if feature.startswith("leverage_") or feature.startswith("solvency_"):
+        return "quality"
+    if feature.startswith("growth_"):
+        return "growth"
     if feature.startswith("close_to_ma_") or feature.startswith("trend_"):
         return "sma"
     if feature.startswith("ma_spread_"):
@@ -126,6 +162,35 @@ def _infer_factor_family(feature: str) -> str:
 
 
 def _infer_factor_expression(feature: str) -> str:
+    fundamental_expressions = {
+        "value_earnings_yield": "1 / pe_ttm",
+        "value_book_to_price": "1 / pb",
+        "value_sales_yield": "1 / ps_ttm",
+        "value_dividend_yield": "dv_ttm",
+        "quality_roe": "roe",
+        "quality_roe_dt": "roe_dt",
+        "quality_roa": "roa",
+        "quality_roic": "roic",
+        "quality_grossprofit_margin": "grossprofit_margin",
+        "quality_netprofit_margin": "netprofit_margin",
+        "quality_ocfps": "ocfps",
+        "quality_cfps": "cfps",
+        "quality_profit_dedt_to_mv": "profit_dedt / float_mv",
+        "leverage_debt_to_assets": "-debt_to_assets",
+        "solvency_current_ratio": "current_ratio",
+        "solvency_quick_ratio": "quick_ratio",
+        "growth_basic_eps_yoy": "basic_eps_yoy",
+        "growth_dt_eps_yoy": "dt_eps_yoy",
+        "growth_netprofit_yoy": "netprofit_yoy",
+        "growth_dt_netprofit_yoy": "dt_netprofit_yoy",
+        "growth_ocf_yoy": "ocf_yoy",
+        "growth_revenue_yoy": "tr_yoy",
+        "growth_operating_revenue_yoy": "or_yoy",
+        "growth_q_sales_yoy": "q_sales_yoy",
+        "growth_q_op_qoq": "q_op_qoq",
+    }
+    if feature in fundamental_expressions:
+        return fundamental_expressions[feature]
     if match := re.fullmatch(r"close_to_ma_(\d+)", feature):
         window = int(match.group(1))
         return f"close / ma({window}) - 1"
@@ -199,6 +264,16 @@ def _infer_factor_params(feature: str) -> dict:
 
 
 def _infer_factor_template(feature: str) -> str:
+    if feature.startswith("value_"):
+        return "fundamental_value"
+    if feature.startswith("quality_"):
+        return "fundamental_quality"
+    if feature.startswith("leverage_"):
+        return "fundamental_leverage"
+    if feature.startswith("solvency_"):
+        return "fundamental_solvency"
+    if feature.startswith("growth_"):
+        return "fundamental_growth"
     if feature.startswith("close_to_ma_"):
         return "close_to_ma"
     if feature.startswith("trend_"):
@@ -238,6 +313,16 @@ def _infer_factor_template(feature: str) -> str:
 
 def _infer_factor_subfamily(feature: str) -> str:
     family = _infer_factor_family(feature)
+    if family == "value":
+        return "valuation"
+    if family == "quality":
+        if feature.startswith("leverage_"):
+            return "leverage"
+        if feature.startswith("solvency_"):
+            return "solvency"
+        return "profitability"
+    if family == "growth":
+        return "fundamental_growth"
     if family == "sma":
         if feature.startswith("close_to_ma_"):
             return "price_vs_ma"
@@ -269,6 +354,35 @@ def _infer_factor_subfamily(feature: str) -> str:
 
 
 def _infer_factor_dependencies(feature: str) -> list[str]:
+    fundamental_dependencies = {
+        "value_earnings_yield": ["pe_ttm"],
+        "value_book_to_price": ["pb"],
+        "value_sales_yield": ["ps_ttm"],
+        "value_dividend_yield": ["dv_ttm"],
+        "quality_roe": ["roe"],
+        "quality_roe_dt": ["roe_dt"],
+        "quality_roa": ["roa"],
+        "quality_roic": ["roic"],
+        "quality_grossprofit_margin": ["grossprofit_margin"],
+        "quality_netprofit_margin": ["netprofit_margin"],
+        "quality_ocfps": ["ocfps"],
+        "quality_cfps": ["cfps"],
+        "quality_profit_dedt_to_mv": ["profit_dedt", "float_mv"],
+        "leverage_debt_to_assets": ["debt_to_assets"],
+        "solvency_current_ratio": ["current_ratio"],
+        "solvency_quick_ratio": ["quick_ratio"],
+        "growth_basic_eps_yoy": ["basic_eps_yoy"],
+        "growth_dt_eps_yoy": ["dt_eps_yoy"],
+        "growth_netprofit_yoy": ["netprofit_yoy"],
+        "growth_dt_netprofit_yoy": ["dt_netprofit_yoy"],
+        "growth_ocf_yoy": ["ocf_yoy"],
+        "growth_revenue_yoy": ["tr_yoy"],
+        "growth_operating_revenue_yoy": ["or_yoy"],
+        "growth_q_sales_yoy": ["q_sales_yoy"],
+        "growth_q_op_qoq": ["q_op_qoq"],
+    }
+    if feature in fundamental_dependencies:
+        return fundamental_dependencies[feature]
     if feature.startswith(("close_to_ma_", "trend_", "ma_spread_", "ret_", "channel_pos_", "distance_to_", "price_zscore_", "breakout_ratio_")):
         return ["close", "high", "low"]
     if feature.startswith(("turnover_", "amount_", "price_volume_div_")):
@@ -473,6 +587,36 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     out["efficiency_ratio_60"] = (out["close"] - g["close"].shift(60)).abs() / path_60.replace(0, np.nan)
 
     out["float_mv_log"] = np.log(out["float_mv"].clip(lower=1.0))
+
+    # Fundamental features are point-in-time fields already aligned in the panel.
+    out["value_earnings_yield"] = 1.0 / out["pe_ttm"].replace(0, np.nan)
+    out["value_book_to_price"] = 1.0 / out["pb"].replace(0, np.nan)
+    out["value_sales_yield"] = 1.0 / out["ps_ttm"].replace(0, np.nan)
+    out["value_dividend_yield"] = out["dv_ttm"]
+
+    out["quality_roe"] = out["roe"]
+    out["quality_roe_dt"] = out["roe_dt"]
+    out["quality_roa"] = out["roa"]
+    out["quality_roic"] = out["roic"]
+    out["quality_grossprofit_margin"] = out["grossprofit_margin"]
+    out["quality_netprofit_margin"] = out["netprofit_margin"]
+    out["quality_ocfps"] = out["ocfps"]
+    out["quality_cfps"] = out["cfps"]
+    out["quality_profit_dedt_to_mv"] = out["profit_dedt"] / out["float_mv"].replace(0, np.nan)
+
+    out["leverage_debt_to_assets"] = -out["debt_to_assets"]
+    out["solvency_current_ratio"] = out["current_ratio"]
+    out["solvency_quick_ratio"] = out["quick_ratio"]
+
+    out["growth_basic_eps_yoy"] = out["basic_eps_yoy"]
+    out["growth_dt_eps_yoy"] = out["dt_eps_yoy"]
+    out["growth_netprofit_yoy"] = out["netprofit_yoy"]
+    out["growth_dt_netprofit_yoy"] = out["dt_netprofit_yoy"]
+    out["growth_ocf_yoy"] = out["ocf_yoy"]
+    out["growth_revenue_yoy"] = out["tr_yoy"]
+    out["growth_operating_revenue_yoy"] = out["or_yoy"]
+    out["growth_q_sales_yoy"] = out["q_sales_yoy"]
+    out["growth_q_op_qoq"] = out["q_op_qoq"]
 
     for col in FEATURE_COLUMNS:
         out[col] = out[col].astype("float32")
