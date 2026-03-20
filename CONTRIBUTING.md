@@ -47,6 +47,7 @@ Do not track:
 ## Useful commands
 
 ```bash
+make help
 git status
 git log --oneline --decorate -n 20
 git diff

@@ -1,0 +1,66 @@
+# Project Status
+
+Last updated: 2026-03-20
+
+## Scope
+
+This repository is a local A-share daily cross-sectional research system centered on:
+
+- raw market data refresh into DuckDB
+- panel export for research-ready data
+- feature generation and label construction
+- Ridge and LightGBM model training
+- portfolio construction and backtest diagnostics
+- factor research workflows such as rolling research, factor-chain screening, and family labs
+
+## Current baseline
+
+- default CLI entrypoint: `aqt`
+- source package: `src/aqt/`
+- raw store: `stock_data.duckdb`
+- default panel path: `data/daily_bars.parquet`
+- default output root: `outputs/`
+
+## Main workflows
+
+- `aqt run`: default rolling training and backtest flow
+- `aqt research-run`: rolling train/valid/test evaluation
+- `aqt factor-chain-run`: train-period feature screening plus downstream model test
+- `aqt single-factor-run`: single-factor ranking and bucket diagnostics
+- `aqt family-lab`: grouped factor family experiments
+- `aqt update-raw`: Tushare incremental refresh into DuckDB
+- `aqt daily-research`: one-shot daily refresh plus research run
+
+## Data snapshot
+
+DuckDB tables observed on 2026-03-20:
+
+- `daily_kline`: 15,727,978 rows
+- `daily_basic`: 11,534,329 rows
+- `stock_basic`: 5,810 rows
+- `index_weight`: 74,002 rows
+- `index_daily`: 1,503 rows
+- `fina_indicator`: 366,505 rows
+- `margin_detail`: 1,191,525 rows
+- `top_inst`: 232,189 rows
+- `stock_zt_pool`: 112 rows
+- `financial_news`: 15 rows
+
+## Latest tracked git baseline
+
+- branch: `main`
+- initial import commit: `21df251`
+- collaboration baseline commit: `9da8080`
+
+## Working conventions
+
+- keep `main` in a runnable state
+- develop new work in `feat/*`, `fix/*`, or `research/*`
+- do not version local data, databases, or generated outputs
+- use `make help` for common commands
+
+## Next recommended maintenance
+
+- keep this file updated when workflow assumptions or major milestones change
+- add a short note here when a new research direction becomes the active focus
+- consider recording a weekly summary if the project starts moving faster
