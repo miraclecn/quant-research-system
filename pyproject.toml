@@ -1,0 +1,28 @@
+[project]
+name = "a-share-research"
+version = "0.1.0"
+description = "Minimal A-share daily cross-sectional research pipeline with Ridge and LightGBM baselines."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "scikit-learn>=1.4",
+  "lightgbm>=4.0",
+  "pyarrow>=15.0",
+  "duckdb>=1.0",
+  "tushare>=1.4",
+]
+
+[project.scripts]
+aqt = "aqt.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
