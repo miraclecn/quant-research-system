@@ -231,6 +231,133 @@ def _build_factor_evaluation(
     return evaluation, whitelist
 
 
+def _run_single_factor_evaluation(
+    panel: pd.DataFrame,
+    features: list[str],
+    target_col: str,
+    cfg: AppConfig,
+    output_dir: Path,
+    *,
+    bucket_count: int,
+    top_k: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if panel.empty:
+        raise ValueError("No data available for single-factor evaluation.")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    registry = build_factor_registry(features)
+    registry.to_csv(output_dir / "factor_registry.csv", index=False)
+
+    annual_rows: list[dict] = []
+    years = sorted(panel["date"].dt.year.unique().tolist())
+    for year in years:
+        year_df = panel.loc[panel["date"].dt.year == year].copy()
+        if year_df.empty:
+            continue
+
+        year_dir = output_dir / str(year)
+        year_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics = summarize_feature_diagnostics(year_df, features, target_col)
+        if diagnostics.empty:
+            continue
+
+        diagnostics["abs_mean_rank_ic"] = diagnostics["mean_rank_ic"].abs()
+        diagnostics["direction"] = diagnostics["mean_rank_ic"].apply(lambda x: 1 if pd.isna(x) or x >= 0 else -1)
+        diagnostics["sign_flipped"] = diagnostics["direction"].eq(-1)
+        diagnostics = diagnostics.sort_values(
+            ["abs_mean_rank_ic", "rank_ic_ir", "mean_top_bottom_spread"],
+            ascending=False,
+        ).reset_index(drop=True)
+        diagnostics.to_csv(year_dir / "single_factor_summary.csv", index=False)
+
+        selected = diagnostics.copy()
+        if top_k > 0:
+            selected = selected.head(top_k).copy()
+        selected.to_csv(year_dir / "single_factor_selected.csv", index=False)
+
+        year_report_rows: list[dict] = []
+        for row in selected.to_dict(orient="records"):
+            feature = row["feature"]
+            direction = int(row["direction"])
+            standardized_col = f"{feature}_sf_score"
+            scored = winsorize_and_zscore_by_date(year_df, feature, standardized_col)
+            if direction < 0:
+                scored[standardized_col] = scored[standardized_col] * -1.0
+
+            factor_dir = year_dir / feature
+            factor_dir.mkdir(parents=True, exist_ok=True)
+
+            ic_df, ic_summary, bucket_df = compute_signal_diagnostics(
+                scored,
+                score_col=standardized_col,
+                target_col=target_col,
+                bucket_count=bucket_count,
+            )
+            group_returns, group_metrics, group_summary = compute_single_factor_group_backtest(
+                scored,
+                score_col=standardized_col,
+                target_col=target_col,
+                bucket_count=bucket_count,
+            )
+            top_bucket = group_summary.get("top_bucket", f"Q{bucket_count}")
+            top_bucket_portfolio = pd.DataFrame(
+                {
+                    "date": group_returns["date"],
+                    "portfolio_ret": group_returns[top_bucket].fillna(0.0),
+                }
+            )
+            top_bucket_portfolio["equity"] = (1.0 + top_bucket_portfolio["portfolio_ret"]).cumprod()
+            official_benchmark = load_official_index_benchmark(replace(cfg, output_dir=factor_dir), top_bucket_portfolio["date"])
+            _, top_bucket_excess_metrics = compare_to_official_index(top_bucket_portfolio, official_benchmark)
+
+            ic_df.to_csv(factor_dir / "ic_timeseries.csv", index=False)
+            bucket_df.to_csv(factor_dir / "bucket_returns.csv", index=False)
+            group_returns.to_csv(factor_dir / "group_backtest_returns.csv", index=False)
+            group_metrics.to_csv(factor_dir / "group_backtest_metrics.csv", index=False)
+            save_json(ic_summary, factor_dir / "diagnostics.json")
+            save_json(group_summary, factor_dir / "group_backtest_summary.json")
+            save_json(top_bucket_excess_metrics, factor_dir / "top_bucket_official_index_excess.json")
+
+            report_row = {
+                "year": year,
+                "feature": feature,
+                "direction": direction,
+                "sign_flipped": bool(row["sign_flipped"]),
+                "mean_rank_ic": row["mean_rank_ic"],
+                "rank_ic_ir": row["rank_ic_ir"],
+                "positive_rank_ic_ratio": row["positive_rank_ic_ratio"],
+                "mean_top_bottom_spread": row["mean_top_bottom_spread"],
+                "long_short_annual_return_est": group_summary.get("long_short_annual_return_est"),
+                "long_short_sharpe_est": group_summary.get("long_short_sharpe_est"),
+                "top_bucket_annual_return_est": group_summary.get("top_bucket_annual_return_est"),
+                "bottom_bucket_annual_return_est": group_summary.get("bottom_bucket_annual_return_est"),
+                "top_bucket_official_index_excess_annual_return_est": top_bucket_excess_metrics.get("annual_return_est"),
+                "top_bucket_official_index_excess_sharpe_est": top_bucket_excess_metrics.get("sharpe_est"),
+                "bucket_return_spearman": group_summary.get("bucket_return_spearman"),
+                "bucket_return_monotonic_increasing": group_summary.get("bucket_return_monotonic_increasing"),
+                "bucket_return_monotonic_decreasing": group_summary.get("bucket_return_monotonic_decreasing"),
+            }
+            year_report_rows.append(report_row)
+            annual_rows.append(report_row)
+
+        if year_report_rows:
+            pd.DataFrame(year_report_rows).sort_values(
+                ["mean_rank_ic", "long_short_annual_return_est"],
+                ascending=False,
+            ).to_csv(year_dir / "single_factor_report.csv", index=False)
+
+    annual_report = pd.DataFrame(annual_rows)
+    if annual_report.empty:
+        raise ValueError("No annual single-factor reports were generated for the requested window.")
+
+    annual_report.to_csv(output_dir / "single_factor_annual_report.csv", index=False)
+    evaluation, whitelist = _build_factor_evaluation(annual_report=annual_report, registry=registry, cfg=cfg)
+    evaluation.to_csv(output_dir / "factor_evaluation.csv", index=False)
+    whitelist.to_csv(output_dir / "factor_whitelist.csv", index=False)
+    evaluation.to_csv(output_dir / "single_factor_stability.csv", index=False)
+    return registry, evaluation, whitelist
+
+
 def _select_features_from_diagnostics(
     diagnostics: pd.DataFrame,
     top_k: int,
@@ -773,37 +900,6 @@ def run_factor_chain_pipeline(
     panel = apply_universe_filters(panel, cfg.data)
 
     all_features = cfg.train.features or FEATURE_COLUMNS
-    factor_eval_dir = cfg.output_dir / "factor_research"
-    factor_eval_cfg = replace(cfg, output_dir=factor_eval_dir)
-    run_single_factor_pipeline(
-        factor_eval_cfg,
-        research_start=research_start,
-        research_end=research_end,
-        bucket_count=5,
-        top_k=max(factor_top_k, 20),
-    )
-    factor_registry = pd.read_csv(factor_eval_dir / "factor_registry.csv")
-    factor_evaluation = pd.read_csv(factor_eval_dir / "factor_evaluation.csv")
-    factor_whitelist = pd.read_csv(factor_eval_dir / "factor_whitelist.csv")
-    if factor_whitelist.empty:
-        fallback_top_n = cfg.train.factor_eval.fallback_top_n
-        fallback_count = max(1, factor_top_k) if factor_top_k > 0 else min(fallback_top_n, len(factor_evaluation))
-        factor_whitelist = factor_evaluation.head(fallback_count).copy()
-        factor_whitelist["pass_single_factor_gate"] = False
-        factor_whitelist["selected_reason"] = "fallback_top_quality_score"
-    elif "selected_reason" not in factor_whitelist.columns:
-        factor_whitelist["selected_reason"] = "pass_single_factor_gate"
-    factor_registry.to_csv(cfg.output_dir / "factor_registry.csv", index=False)
-    factor_evaluation.to_csv(cfg.output_dir / "factor_evaluation.csv", index=False)
-    factor_whitelist.to_csv(cfg.output_dir / "factor_whitelist.csv", index=False)
-    whitelist_candidates = factor_whitelist.loc[
-        factor_whitelist["feature"].isin(all_features)
-    ].copy()
-    if factor_top_k > 0:
-        whitelist_candidates = whitelist_candidates.head(factor_top_k).copy()
-    if whitelist_candidates.empty:
-        raise ValueError("No whitelist factors overlap with the configured training feature set.")
-
     target_col = f"future_return_{cfg.labels.primary_horizon}d"
     panel_columns_for_merge = [
         "date",
@@ -854,6 +950,37 @@ def run_factor_chain_pipeline(
         split_dir = cfg.output_dir / f"split_{split_id:02d}"
         split_dir.mkdir(parents=True, exist_ok=True)
         split_cfg = replace(cfg, output_dir=split_dir)
+
+        factor_eval_dir = split_dir / "factor_research"
+        split_train_panel = panel.loc[
+            (panel["date"] >= train_start_ts) & (panel["date"] < train_end_ts)
+        ].copy()
+        _, factor_evaluation, factor_whitelist = _run_single_factor_evaluation(
+            panel=split_train_panel,
+            features=all_features,
+            target_col=target_col,
+            cfg=split_cfg,
+            output_dir=factor_eval_dir,
+            bucket_count=5,
+            top_k=max(factor_top_k, cfg.train.factor_eval.fallback_top_n),
+        )
+        if factor_whitelist.empty:
+            fallback_top_n = cfg.train.factor_eval.fallback_top_n
+            fallback_count = max(1, factor_top_k) if factor_top_k > 0 else min(fallback_top_n, len(factor_evaluation))
+            factor_whitelist = factor_evaluation.head(fallback_count).copy()
+            factor_whitelist["pass_single_factor_gate"] = False
+            factor_whitelist["selected_reason"] = "fallback_top_quality_score"
+        elif "selected_reason" not in factor_whitelist.columns:
+            factor_whitelist["selected_reason"] = "pass_single_factor_gate"
+        whitelist_candidates = factor_whitelist.loc[
+            factor_whitelist["feature"].isin(all_features)
+        ].copy()
+        if factor_top_k > 0:
+            whitelist_candidates = whitelist_candidates.head(factor_top_k).copy()
+        if whitelist_candidates.empty:
+            cursor = cursor + pd.DateOffset(months=step_months)
+            split_id += 1
+            continue
 
         selected_features = whitelist_candidates[[
             "feature",
@@ -1007,7 +1134,53 @@ def run_factor_chain_pipeline(
         selected_frequency = pd.DataFrame(columns=["feature"])
     if "feature" not in ridge_stability.columns:
         ridge_stability = pd.DataFrame(columns=["feature"])
-    ridge_screen = factor_whitelist.merge(
+    whitelist_rows: list[pd.DataFrame] = []
+    evaluation_rows: list[pd.DataFrame] = []
+    registry_rows: list[pd.DataFrame] = []
+    for split_id in split_ids:
+        split_factor_dir = cfg.output_dir / f"split_{split_id:02d}" / "factor_research"
+        registry_df = _read_csv_or_empty(split_factor_dir / "factor_registry.csv")
+        evaluation_df = _read_csv_or_empty(split_factor_dir / "factor_evaluation.csv")
+        whitelist_df = _read_csv_or_empty(split_factor_dir / "factor_whitelist.csv")
+        if not registry_df.empty:
+            registry_df = registry_df.copy()
+            registry_df["split_id"] = split_id
+            registry_rows.append(registry_df)
+        if not evaluation_df.empty:
+            evaluation_df = evaluation_df.copy()
+            evaluation_df["split_id"] = split_id
+            evaluation_rows.append(evaluation_df)
+        if not whitelist_df.empty:
+            whitelist_df = whitelist_df.copy()
+            whitelist_df["split_id"] = split_id
+            whitelist_rows.append(whitelist_df)
+
+    combined_registry = pd.concat(registry_rows, ignore_index=True) if registry_rows else pd.DataFrame()
+    combined_evaluation = pd.concat(evaluation_rows, ignore_index=True) if evaluation_rows else pd.DataFrame()
+    combined_whitelist = pd.concat(whitelist_rows, ignore_index=True) if whitelist_rows else pd.DataFrame()
+    if not combined_registry.empty:
+        combined_registry.to_csv(cfg.output_dir / "factor_registry.csv", index=False)
+    if not combined_evaluation.empty:
+        combined_evaluation.to_csv(cfg.output_dir / "factor_evaluation.csv", index=False)
+    if not combined_whitelist.empty:
+        combined_whitelist.to_csv(cfg.output_dir / "factor_whitelist.csv", index=False)
+
+    whitelist_summary = pd.DataFrame(columns=["feature", "whitelist_count", "whitelist_quality_score_mean", "whitelist_latest_top_bucket_excess_mean", "whitelist_rate"])
+    if not combined_whitelist.empty:
+        split_count = max(1, len(split_ids))
+        whitelist_summary = (
+            combined_whitelist.groupby("feature", observed=False)
+            .agg(
+                whitelist_count=("split_id", "nunique"),
+                whitelist_quality_score_mean=("quality_score", "mean"),
+                whitelist_latest_top_bucket_excess_mean=("latest_top_bucket_official_index_excess_annual_return_est", "mean"),
+            )
+            .reset_index()
+        )
+        whitelist_summary["whitelist_rate"] = whitelist_summary["whitelist_count"] / split_count
+        whitelist_summary.to_csv(cfg.output_dir / "whitelist_summary.csv", index=False)
+
+    ridge_screen = whitelist_summary.merge(
         selected_frequency,
         on="feature",
         how="left",
@@ -1030,6 +1203,10 @@ def run_factor_chain_pipeline(
     )
     if "ridge_original_abs_coef_mean" not in ridge_screen.columns:
         ridge_screen["ridge_original_abs_coef_mean"] = 0.0
+    if "quality_score" not in ridge_screen.columns and "whitelist_quality_score_mean" in ridge_screen.columns:
+        ridge_screen["quality_score"] = ridge_screen["whitelist_quality_score_mean"]
+    if "quality_score" not in ridge_screen.columns:
+        ridge_screen["quality_score"] = 0.0
     ridge_screen = ridge_screen.sort_values(
         ["pass_ridge_gate", "quality_score", "selection_rate", "ridge_original_abs_coef_mean"],
         ascending=[False, False, False, False],
@@ -1080,115 +1257,15 @@ def run_single_factor_pipeline(
     target_col = f"future_return_{cfg.labels.primary_horizon}d"
     if panel.empty:
         raise ValueError("No data available for the requested single-factor window.")
-    registry = build_factor_registry(features)
-    registry.to_csv(cfg.output_dir / "factor_registry.csv", index=False)
-
-    annual_rows: list[dict] = []
-    years = sorted(panel["date"].dt.year.unique().tolist())
-    for year in years:
-        year_df = panel.loc[panel["date"].dt.year == year].copy()
-        if year_df.empty:
-            continue
-
-        year_dir = cfg.output_dir / str(year)
-        year_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics = summarize_feature_diagnostics(year_df, features, target_col)
-        if diagnostics.empty:
-            continue
-
-        diagnostics["abs_mean_rank_ic"] = diagnostics["mean_rank_ic"].abs()
-        diagnostics["direction"] = diagnostics["mean_rank_ic"].apply(lambda x: 1 if pd.isna(x) or x >= 0 else -1)
-        diagnostics["sign_flipped"] = diagnostics["direction"].eq(-1)
-        diagnostics = diagnostics.sort_values(
-            ["abs_mean_rank_ic", "rank_ic_ir", "mean_top_bottom_spread"],
-            ascending=False,
-        ).reset_index(drop=True)
-        diagnostics.to_csv(year_dir / "single_factor_summary.csv", index=False)
-
-        selected = diagnostics.copy()
-        if top_k > 0:
-            selected = selected.head(top_k).copy()
-        selected.to_csv(year_dir / "single_factor_selected.csv", index=False)
-
-        year_report_rows: list[dict] = []
-        for row in selected.to_dict(orient="records"):
-            feature = row["feature"]
-            direction = int(row["direction"])
-            standardized_col = f"{feature}_sf_score"
-            scored = winsorize_and_zscore_by_date(year_df, feature, standardized_col)
-            if direction < 0:
-                scored[standardized_col] = scored[standardized_col] * -1.0
-
-            factor_dir = year_dir / feature
-            factor_dir.mkdir(parents=True, exist_ok=True)
-
-            ic_df, ic_summary, bucket_df = compute_signal_diagnostics(
-                scored,
-                score_col=standardized_col,
-                target_col=target_col,
-                bucket_count=bucket_count,
-            )
-            group_returns, group_metrics, group_summary = compute_single_factor_group_backtest(
-                scored,
-                score_col=standardized_col,
-                target_col=target_col,
-                bucket_count=bucket_count,
-            )
-            top_bucket = group_summary.get("top_bucket", f"Q{bucket_count}")
-            top_bucket_portfolio = pd.DataFrame(
-                {
-                    "date": group_returns["date"],
-                    "portfolio_ret": group_returns[top_bucket].fillna(0.0),
-                }
-            )
-            top_bucket_portfolio["equity"] = (1.0 + top_bucket_portfolio["portfolio_ret"]).cumprod()
-            official_benchmark = load_official_index_benchmark(split_cfg := replace(cfg, output_dir=factor_dir), top_bucket_portfolio["date"])
-            _, top_bucket_excess_metrics = compare_to_official_index(top_bucket_portfolio, official_benchmark)
-
-            ic_df.to_csv(factor_dir / "ic_timeseries.csv", index=False)
-            bucket_df.to_csv(factor_dir / "bucket_returns.csv", index=False)
-            group_returns.to_csv(factor_dir / "group_backtest_returns.csv", index=False)
-            group_metrics.to_csv(factor_dir / "group_backtest_metrics.csv", index=False)
-            save_json(ic_summary, factor_dir / "diagnostics.json")
-            save_json(group_summary, factor_dir / "group_backtest_summary.json")
-            save_json(top_bucket_excess_metrics, factor_dir / "top_bucket_official_index_excess.json")
-
-            report_row = {
-                "year": year,
-                "feature": feature,
-                "direction": direction,
-                "sign_flipped": bool(row["sign_flipped"]),
-                "mean_rank_ic": row["mean_rank_ic"],
-                "rank_ic_ir": row["rank_ic_ir"],
-                "positive_rank_ic_ratio": row["positive_rank_ic_ratio"],
-                "mean_top_bottom_spread": row["mean_top_bottom_spread"],
-                "long_short_annual_return_est": group_summary.get("long_short_annual_return_est"),
-                "long_short_sharpe_est": group_summary.get("long_short_sharpe_est"),
-                "top_bucket_annual_return_est": group_summary.get("top_bucket_annual_return_est"),
-                "bottom_bucket_annual_return_est": group_summary.get("bottom_bucket_annual_return_est"),
-                "top_bucket_official_index_excess_annual_return_est": top_bucket_excess_metrics.get("annual_return_est"),
-                "top_bucket_official_index_excess_sharpe_est": top_bucket_excess_metrics.get("sharpe_est"),
-                "bucket_return_spearman": group_summary.get("bucket_return_spearman"),
-                "bucket_return_monotonic_increasing": group_summary.get("bucket_return_monotonic_increasing"),
-                "bucket_return_monotonic_decreasing": group_summary.get("bucket_return_monotonic_decreasing"),
-            }
-            year_report_rows.append(report_row)
-            annual_rows.append(report_row)
-
-        pd.DataFrame(year_report_rows).sort_values(
-            ["mean_rank_ic", "long_short_annual_return_est"],
-            ascending=False,
-        ).to_csv(year_dir / "single_factor_report.csv", index=False)
-
-    annual_report = pd.DataFrame(annual_rows)
-    if annual_report.empty:
-        raise ValueError("No annual single-factor reports were generated for the requested window.")
-
-    annual_report.to_csv(cfg.output_dir / "single_factor_annual_report.csv", index=False)
-    evaluation, whitelist = _build_factor_evaluation(annual_report=annual_report, registry=registry, cfg=cfg)
-    evaluation.to_csv(cfg.output_dir / "factor_evaluation.csv", index=False)
-    whitelist.to_csv(cfg.output_dir / "factor_whitelist.csv", index=False)
-    evaluation.to_csv(cfg.output_dir / "single_factor_stability.csv", index=False)
+    _run_single_factor_evaluation(
+        panel=panel,
+        features=features,
+        target_col=target_col,
+        cfg=cfg,
+        output_dir=cfg.output_dir,
+        bucket_count=bucket_count,
+        top_k=top_k,
+    )
 
 
 def run_family_lab_pipeline(
