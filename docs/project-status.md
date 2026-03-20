@@ -20,13 +20,14 @@ This repository is a local A-share daily cross-sectional research system centere
 - raw store: `stock_data.duckdb`
 - default panel path: `data/daily_bars.parquet`
 - default output root: `outputs/`
+- unified factor research chain: `factor_registry -> factor_evaluation -> factor_whitelist -> ridge_screen -> lgbm_feature_pool`
 
 ## Main workflows
 
 - `aqt run`: default rolling training and backtest flow
 - `aqt research-run`: rolling train/valid/test evaluation
-- `aqt factor-chain-run`: train-period feature screening plus downstream model test
-- `aqt single-factor-run`: single-factor ranking and bucket diagnostics
+- `aqt single-factor-run`: unified factor evaluation and whitelist generation
+- `aqt factor-chain-run`: whitelist-driven Ridge and LightGBM feature chain
 - `aqt family-lab`: grouped factor family experiments
 - `aqt update-raw`: Tushare incremental refresh into DuckDB
 - `aqt daily-research`: one-shot daily refresh plus research run
@@ -58,6 +59,7 @@ DuckDB tables observed on 2026-03-20:
 - develop new work in `feat/*`, `fix/*`, or `research/*`
 - do not version local data, databases, or generated outputs
 - use `make help` for common commands
+- treat `factor_evaluation.csv` as the only source of truth for single-factor quality decisions
 
 ## Next recommended maintenance
 

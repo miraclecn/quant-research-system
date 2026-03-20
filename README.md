@@ -76,6 +76,21 @@ aqt research-run --input data/daily_bars.parquet --research-start 2020-01-01 --r
 
 This keeps the default raw-score workflow unchanged and adds an extra `lgbm_neutralized` result using cross-sectional industry and size neutralization.
 
+Unified factor research workflow:
+
+```bash
+aqt single-factor-run --input data/daily_bars.parquet --output-dir outputs/factor-eval --research-start 2020-01-01 --research-end 2025-12-31 --single-factor-top-k 20
+aqt factor-chain-run --input data/daily_bars.parquet --output-dir outputs/factor-chain --research-start 2020-01-01 --research-end 2025-12-31 --train-months 36 --valid-months 12 --test-months 12 --step-months 12 --factor-top-k 20
+```
+
+This workflow is now organized as:
+
+- `factor_registry.csv`: candidate factor catalog with family, expression, and params
+- `factor_evaluation.csv`: unified single-factor evaluation table
+- `factor_whitelist.csv`: factors passing the single-factor gate
+- `ridge_screen.csv`: whitelist factors re-screened by rolling Ridge stability
+- `lgbm_feature_pool.csv`: final feature pool handed to LightGBM research
+
 Recommended workflow when keeping DuckDB as the raw store:
 
 ```bash
@@ -131,6 +146,23 @@ For `research-run`, the top-level output directory also includes:
 - `research_metrics.json` with nested split metrics
 - `split_summary.csv` with one flat row per split, phase, and model
 
+For `single-factor-run`, the top-level output directory also includes:
+
+- `factor_registry.csv`
+- `factor_evaluation.csv`
+- `factor_whitelist.csv`
+- `single_factor_annual_report.csv`
+- `single_factor_stability.csv`
+
+For `factor-chain-run`, the top-level output directory also includes:
+
+- `factor_registry.csv`
+- `factor_evaluation.csv`
+- `factor_whitelist.csv`
+- `ridge_screen.csv`
+- `lgbm_feature_pool.csv`
+- split-level `selected_features.csv`, `ridge_coefficients.csv`, and `research_metrics.json`
+
 ## Notes
 
 - This starter is intentionally simple and meant for fast iteration.
@@ -148,4 +180,6 @@ For `research-run`, the top-level output directory also includes:
 - `aqt prune-db` produces a keep/drop recommendation so the DuckDB file can converge toward a raw-only store.
 - `aqt prune-db --execute` applies that drop list to the database. Run a filesystem backup first if you want rollback.
 - `aqt export-panel` lets you materialize a research-ready `parquet` file and keep `duckdb` as the raw source of truth.
+- `aqt single-factor-run` is now the unified factor evaluation entrypoint and should be treated as the only source of truth for factor quality gates.
+- `aqt factor-chain-run` now consumes `factor_whitelist.csv` from the unified single-factor evaluation flow instead of using an independent ad hoc factor scoring rule.
 - You should tighten the execution model before going live, especially around limit-up, limit-down, suspensions, and order sizing.

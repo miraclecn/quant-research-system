@@ -8,6 +8,17 @@ Last updated: 2026-03-20
 - some quick or narrow-window runs look strong, but drawdown is still large
 - reversal-style single factors currently look more promising than the SMA trend family
 - factor-chain results are not yet stable enough to treat as a better default than the raw baseline
+- the factor research workflow is being unified so that single-factor evaluation becomes the only upstream gate for Ridge and LightGBM
+
+## Workflow note
+
+The repository now moves toward one factor research system:
+
+1. build `factor_registry.csv`
+2. run unified single-factor evaluation into `factor_evaluation.csv`
+3. gate factors into `factor_whitelist.csv`
+4. re-screen whitelist factors with Ridge into `ridge_screen.csv`
+5. pass the surviving pool into LightGBM via `lgbm_feature_pool.csv`
 
 ## Baseline model snapshot
 

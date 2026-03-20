@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -64,6 +67,74 @@ FEATURE_COLUMNS = [
     "amount_trend_5",
     "float_mv_log",
 ]
+
+
+def _infer_factor_family(feature: str) -> str:
+    if feature.startswith("close_to_ma_") or feature.startswith("trend_"):
+        return "sma"
+    if feature.startswith("ret_") or feature in {"gap_1", "intraday_ret_1", "overnight_ret_5", "rebound_from_low_20"}:
+        return "reversal"
+    if feature.startswith("turnover_") or feature.startswith("amount_") or feature.startswith("price_volume_div_"):
+        return "liquidity"
+    if feature.startswith("vol_") or feature.startswith("amp_") or feature.startswith("range_") or feature.startswith("vol_compress_"):
+        return "volatility"
+    if feature.startswith("channel_") or feature.startswith("close_to_high_") or feature.startswith("close_to_low_") or feature.startswith("distance_to_"):
+        return "path"
+    if feature.startswith("float_mv"):
+        return "size"
+    return "misc"
+
+
+def _infer_factor_expression(feature: str) -> str:
+    if match := re.fullmatch(r"close_to_ma_(\d+)", feature):
+        window = int(match.group(1))
+        return f"close / ma({window}) - 1"
+    if match := re.fullmatch(r"trend_(\d+)_(\d+)", feature):
+        fast, slow = (int(group) for group in match.groups())
+        return f"ma({fast}) / ma({slow}) - 1"
+    if match := re.fullmatch(r"ret_(\d+)", feature):
+        window = int(match.group(1))
+        return f"pct_change(close, {window})"
+    if match := re.fullmatch(r"ret_reversal_(\d+)_(\d+)", feature):
+        fast, slow = (int(group) for group in match.groups())
+        return f"ret({fast}) - ret({slow})"
+    if match := re.fullmatch(r"vol_(\d+)", feature):
+        window = int(match.group(1))
+        return f"std(daily_ret, {window})"
+    if match := re.fullmatch(r"amp_(\d+)", feature):
+        window = int(match.group(1))
+        return f"rolling_high({window}) / rolling_low({window}) - 1"
+    if match := re.fullmatch(r"turnover_(\d+)", feature):
+        window = int(match.group(1))
+        return f"mean(turnover_rate, {window})"
+    return feature
+
+
+def _infer_factor_params(feature: str) -> dict:
+    params = [int(value) for value in re.findall(r"\d+", feature)]
+    if not params:
+        return {}
+    if len(params) == 1:
+        return {"window": params[0]}
+    return {"windows": params}
+
+
+def build_factor_registry(features: list[str] | None = None) -> pd.DataFrame:
+    rows = []
+    for feature in features or FEATURE_COLUMNS:
+        params = _infer_factor_params(feature)
+        rows.append(
+            {
+                "feature": feature,
+                "family": _infer_factor_family(feature),
+                "expression": _infer_factor_expression(feature),
+                "params": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                "direction_hint": "unknown",
+                "status": "candidate",
+                "notes": "",
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["family", "feature"]).reset_index(drop=True)
 
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:

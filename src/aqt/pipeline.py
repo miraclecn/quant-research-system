@@ -9,7 +9,7 @@ import pandas as pd
 from aqt.backtest import build_positions, run_backtest, save_metrics, select_rebalance_dates
 from aqt.config import AppConfig
 from aqt.data import load_panel
-from aqt.features import FEATURE_COLUMNS, add_features
+from aqt.features import FEATURE_COLUMNS, add_features, build_factor_registry
 from aqt.labels import add_labels
 from aqt.models import fit_predict_models
 from aqt.research import (
@@ -102,6 +102,120 @@ def _build_feature_screening_summary(output_dir: Path, split_ids: list[int]) -> 
                 }
             )
     return pd.DataFrame(rows)
+
+
+def _safe_rank(series: pd.Series, ascending: bool = True) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.notna().sum() == 0:
+        return pd.Series(0.0, index=series.index, dtype=float)
+    return numeric.rank(pct=True, ascending=ascending, method="average").fillna(0.0)
+
+
+def _read_csv_or_empty(path: Path) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
+def _build_factor_evaluation(
+    annual_report: pd.DataFrame,
+    registry: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if annual_report.empty:
+        raise ValueError("No annual single-factor reports were generated for evaluation.")
+
+    year_count = int(annual_report["year"].nunique())
+    min_years_required = 1 if year_count <= 1 else max(2, min(4, year_count))
+
+    stability = (
+        annual_report.groupby("feature", observed=False)
+        .agg(
+            years_covered=("year", "nunique"),
+            direction=("direction", lambda s: int(pd.Series(s).mode().iloc[0])),
+            sign_flipped=("sign_flipped", "max"),
+            mean_rank_ic_mean=("mean_rank_ic", "mean"),
+            mean_rank_ic_std=("mean_rank_ic", "std"),
+            rank_ic_ir_mean=("rank_ic_ir", "mean"),
+            positive_rank_ic_ratio_mean=("positive_rank_ic_ratio", "mean"),
+            mean_top_bottom_spread_mean=("mean_top_bottom_spread", "mean"),
+            long_short_annual_return_est_mean=("long_short_annual_return_est", "mean"),
+            long_short_annual_return_est_std=("long_short_annual_return_est", "std"),
+            top_bucket_official_index_excess_annual_return_est_mean=("top_bucket_official_index_excess_annual_return_est", "mean"),
+            top_bucket_official_index_excess_annual_return_est_std=("top_bucket_official_index_excess_annual_return_est", "std"),
+            bucket_return_spearman_mean=("bucket_return_spearman", "mean"),
+            monotonic_year_ratio=("bucket_return_monotonic_increasing", lambda s: float(s.fillna(False).mean())),
+            positive_ic_year_ratio=("mean_rank_ic", lambda s: float((s > 0).mean())),
+            positive_long_short_year_ratio=("long_short_annual_return_est", lambda s: float((s > 0).mean())),
+            positive_top_bucket_excess_year_ratio=("top_bucket_official_index_excess_annual_return_est", lambda s: float((s > 0).mean())),
+            latest_year=("year", "max"),
+        )
+        .reset_index()
+    )
+    latest_rows = annual_report.sort_values(["feature", "year"]).groupby("feature", as_index=False).tail(1)
+    latest_rows = latest_rows.rename(
+        columns={
+            "mean_rank_ic": "latest_mean_rank_ic",
+            "rank_ic_ir": "latest_rank_ic_ir",
+            "long_short_annual_return_est": "latest_long_short_annual_return_est",
+            "long_short_sharpe_est": "latest_long_short_sharpe_est",
+            "top_bucket_official_index_excess_annual_return_est": "latest_top_bucket_official_index_excess_annual_return_est",
+            "bucket_return_spearman": "latest_bucket_return_spearman",
+        }
+    )[[
+        "feature",
+        "latest_mean_rank_ic",
+        "latest_rank_ic_ir",
+        "latest_long_short_annual_return_est",
+        "latest_long_short_sharpe_est",
+        "latest_top_bucket_official_index_excess_annual_return_est",
+        "latest_bucket_return_spearman",
+    ]]
+    evaluation = stability.merge(latest_rows, on="feature", how="left")
+    evaluation = registry.merge(evaluation, on="feature", how="left")
+
+    evaluation["abs_mean_rank_ic_mean"] = evaluation["mean_rank_ic_mean"].abs()
+    evaluation["abs_rank_ic_ir_mean"] = evaluation["rank_ic_ir_mean"].abs()
+    evaluation["quality_score"] = (
+        0.30 * _safe_rank(evaluation["abs_rank_ic_ir_mean"], ascending=True)
+        + 0.20 * _safe_rank(evaluation["abs_mean_rank_ic_mean"], ascending=True)
+        + 0.15 * _safe_rank(evaluation["bucket_return_spearman_mean"], ascending=True)
+        + 0.15 * _safe_rank(evaluation["positive_top_bucket_excess_year_ratio"], ascending=True)
+        + 0.10 * _safe_rank(evaluation["latest_top_bucket_official_index_excess_annual_return_est"], ascending=True)
+        + 0.05 * _safe_rank(evaluation["monotonic_year_ratio"], ascending=True)
+        + 0.05 * _safe_rank(evaluation["positive_ic_year_ratio"], ascending=True)
+        - 0.10 * _safe_rank(evaluation["mean_rank_ic_std"], ascending=True)
+    )
+    evaluation["quality_score"] = evaluation["quality_score"].fillna(0.0).round(6)
+    evaluation["quality_tier"] = "watch"
+    evaluation.loc[evaluation["quality_score"] >= evaluation["quality_score"].quantile(0.80), "quality_tier"] = "core"
+    evaluation.loc[
+        (evaluation["quality_tier"] == "watch")
+        & (evaluation["quality_score"] >= evaluation["quality_score"].quantile(0.50)),
+        "quality_tier",
+    ] = "candidate"
+    evaluation["pass_single_factor_gate"] = (
+        evaluation["years_covered"].fillna(0) >= min_years_required
+    ) & (
+        evaluation["abs_rank_ic_ir_mean"].fillna(0.0) >= 0.10
+    ) & (
+        evaluation["bucket_return_spearman_mean"].fillna(0.0) >= 0.20
+    ) & (
+        evaluation["positive_top_bucket_excess_year_ratio"].fillna(0.0) >= 0.50
+    ) & (
+        evaluation["latest_top_bucket_official_index_excess_annual_return_est"].fillna(-1.0) > 0.0
+    )
+    evaluation = evaluation.sort_values(
+        ["pass_single_factor_gate", "quality_score", "abs_rank_ic_ir_mean", "bucket_return_spearman_mean"],
+        ascending=[False, False, False, False],
+    ).reset_index(drop=True)
+
+    whitelist = evaluation.loc[evaluation["pass_single_factor_gate"]].copy()
+    whitelist["priority_rank"] = range(1, len(whitelist) + 1)
+    whitelist["selected_reason"] = "pass_single_factor_gate"
+    return evaluation, whitelist
 
 
 def _select_features_from_diagnostics(
@@ -646,6 +760,36 @@ def run_factor_chain_pipeline(
     panel = apply_universe_filters(panel, cfg.data)
 
     all_features = cfg.train.features or FEATURE_COLUMNS
+    factor_eval_dir = cfg.output_dir / "factor_research"
+    factor_eval_cfg = replace(cfg, output_dir=factor_eval_dir)
+    run_single_factor_pipeline(
+        factor_eval_cfg,
+        research_start=research_start,
+        research_end=research_end,
+        bucket_count=5,
+        top_k=max(factor_top_k, 20),
+    )
+    factor_registry = pd.read_csv(factor_eval_dir / "factor_registry.csv")
+    factor_evaluation = pd.read_csv(factor_eval_dir / "factor_evaluation.csv")
+    factor_whitelist = pd.read_csv(factor_eval_dir / "factor_whitelist.csv")
+    if factor_whitelist.empty:
+        fallback_count = max(1, factor_top_k) if factor_top_k > 0 else min(20, len(factor_evaluation))
+        factor_whitelist = factor_evaluation.head(fallback_count).copy()
+        factor_whitelist["pass_single_factor_gate"] = False
+        factor_whitelist["selected_reason"] = "fallback_top_quality_score"
+    elif "selected_reason" not in factor_whitelist.columns:
+        factor_whitelist["selected_reason"] = "pass_single_factor_gate"
+    factor_registry.to_csv(cfg.output_dir / "factor_registry.csv", index=False)
+    factor_evaluation.to_csv(cfg.output_dir / "factor_evaluation.csv", index=False)
+    factor_whitelist.to_csv(cfg.output_dir / "factor_whitelist.csv", index=False)
+    whitelist_candidates = factor_whitelist.loc[
+        factor_whitelist["feature"].isin(all_features)
+    ].copy()
+    if factor_top_k > 0:
+        whitelist_candidates = whitelist_candidates.head(factor_top_k).copy()
+    if whitelist_candidates.empty:
+        raise ValueError("No whitelist factors overlap with the configured training feature set.")
+
     target_col = f"future_return_{cfg.labels.primary_horizon}d"
     panel_columns_for_merge = [
         "date",
@@ -697,9 +841,48 @@ def run_factor_chain_pipeline(
         split_dir.mkdir(parents=True, exist_ok=True)
         split_cfg = replace(cfg, output_dir=split_dir)
 
-        train_feature_diagnostics = summarize_feature_diagnostics(train_df, all_features, target_col)
+        selected_features = whitelist_candidates[[
+            "feature",
+            "direction",
+            "sign_flipped",
+            "quality_score",
+            "quality_tier",
+            "mean_rank_ic_mean",
+            "rank_ic_ir_mean",
+            "positive_rank_ic_ratio_mean",
+            "mean_top_bottom_spread_mean",
+        ]].rename(
+            columns={
+                "mean_rank_ic_mean": "train_mean_rank_ic",
+                "rank_ic_ir_mean": "train_rank_ic_ir",
+                "positive_rank_ic_ratio_mean": "train_positive_rank_ic_ratio",
+                "mean_top_bottom_spread_mean": "train_mean_top_bottom_spread",
+            }
+        ).copy()
+        train_feature_diagnostics = summarize_feature_diagnostics(train_df, selected_features["feature"].tolist(), target_col)
         train_feature_diagnostics.to_csv(split_dir / "feature_diagnostics_train.csv", index=False)
-        selected_features = _select_features_from_diagnostics(train_feature_diagnostics, factor_top_k, factor_min_rank_ic)
+        selected_features = selected_features.loc[
+            selected_features["train_mean_rank_ic"].abs().fillna(0.0) >= factor_min_rank_ic
+        ].copy()
+        if selected_features.empty:
+            selected_features = whitelist_candidates[[
+                "feature",
+                "direction",
+                "sign_flipped",
+                "quality_score",
+                "quality_tier",
+                "mean_rank_ic_mean",
+                "rank_ic_ir_mean",
+                "positive_rank_ic_ratio_mean",
+                "mean_top_bottom_spread_mean",
+            ]].rename(
+                columns={
+                    "mean_rank_ic_mean": "train_mean_rank_ic",
+                    "rank_ic_ir_mean": "train_rank_ic_ir",
+                    "positive_rank_ic_ratio_mean": "train_positive_rank_ic_ratio",
+                    "mean_top_bottom_spread_mean": "train_mean_top_bottom_spread",
+                }
+            ).copy()
         selected_features = _deduplicate_selected_features(train_df, selected_features, factor_max_corr)
         if selected_features.empty:
             cursor = cursor + pd.DateOffset(months=step_months)
@@ -804,6 +987,40 @@ def run_factor_chain_pipeline(
         cfg.output_dir / "ridge_coefficient_stability.csv",
         index=False,
     )
+    selected_frequency = _read_csv_or_empty(cfg.output_dir / "selected_feature_frequency.csv")
+    ridge_stability = _read_csv_or_empty(cfg.output_dir / "ridge_coefficient_stability.csv")
+    if "feature" not in selected_frequency.columns:
+        selected_frequency = pd.DataFrame(columns=["feature"])
+    if "feature" not in ridge_stability.columns:
+        ridge_stability = pd.DataFrame(columns=["feature"])
+    ridge_screen = factor_whitelist.merge(
+        selected_frequency,
+        on="feature",
+        how="left",
+    ).merge(
+        ridge_stability,
+        on="feature",
+        how="left",
+        suffixes=("", "_ridge"),
+    )
+    split_count = max(1, len(split_ids))
+    ridge_screen["selection_rate"] = ridge_screen["selection_rate"].fillna(0.0)
+    ridge_screen["pass_ridge_gate"] = (
+        ridge_screen["selection_rate"] >= (0.5 if split_count > 1 else 1.0)
+    ) & (
+        ridge_screen["ridge_original_coef_cv"].fillna(0.0) <= 1.5
+    )
+    if "ridge_original_abs_coef_mean" not in ridge_screen.columns:
+        ridge_screen["ridge_original_abs_coef_mean"] = 0.0
+    ridge_screen = ridge_screen.sort_values(
+        ["pass_ridge_gate", "quality_score", "selection_rate", "ridge_original_abs_coef_mean"],
+        ascending=[False, False, False, False],
+    ).reset_index(drop=True)
+    ridge_screen.to_csv(cfg.output_dir / "ridge_screen.csv", index=False)
+
+    lgbm_feature_pool = ridge_screen.loc[ridge_screen["pass_ridge_gate"]].copy()
+    lgbm_feature_pool["final_status"] = "lgbm_candidate"
+    lgbm_feature_pool.to_csv(cfg.output_dir / "lgbm_feature_pool.csv", index=False)
 
 
 def run_single_factor_pipeline(
@@ -845,6 +1062,8 @@ def run_single_factor_pipeline(
     target_col = f"future_return_{cfg.labels.primary_horizon}d"
     if panel.empty:
         raise ValueError("No data available for the requested single-factor window.")
+    registry = build_factor_registry(features)
+    registry.to_csv(cfg.output_dir / "factor_registry.csv", index=False)
 
     annual_rows: list[dict] = []
     years = sorted(panel["date"].dt.year.unique().tolist())
@@ -948,51 +1167,10 @@ def run_single_factor_pipeline(
         raise ValueError("No annual single-factor reports were generated for the requested window.")
 
     annual_report.to_csv(cfg.output_dir / "single_factor_annual_report.csv", index=False)
-    stability = (
-        annual_report.groupby("feature", observed=False)
-        .agg(
-            years_covered=("year", "nunique"),
-            mean_rank_ic_mean=("mean_rank_ic", "mean"),
-            mean_rank_ic_std=("mean_rank_ic", "std"),
-            rank_ic_ir_mean=("rank_ic_ir", "mean"),
-            long_short_annual_return_est_mean=("long_short_annual_return_est", "mean"),
-            long_short_annual_return_est_std=("long_short_annual_return_est", "std"),
-            top_bucket_official_index_excess_annual_return_est_mean=("top_bucket_official_index_excess_annual_return_est", "mean"),
-            top_bucket_official_index_excess_annual_return_est_std=("top_bucket_official_index_excess_annual_return_est", "std"),
-            bucket_return_spearman_mean=("bucket_return_spearman", "mean"),
-            monotonic_year_ratio=("bucket_return_monotonic_increasing", lambda s: float(s.mean())),
-            positive_ic_year_ratio=("mean_rank_ic", lambda s: float((s > 0).mean())),
-            positive_long_short_year_ratio=("long_short_annual_return_est", lambda s: float((s > 0).mean())),
-            positive_top_bucket_excess_year_ratio=("top_bucket_official_index_excess_annual_return_est", lambda s: float((s > 0).mean())),
-            latest_year=("year", "max"),
-        )
-        .reset_index()
-    )
-    latest_rows = annual_report.sort_values(["feature", "year"]).groupby("feature", as_index=False).tail(1)
-    latest_rows = latest_rows.rename(
-        columns={
-            "mean_rank_ic": "latest_mean_rank_ic",
-            "rank_ic_ir": "latest_rank_ic_ir",
-            "long_short_annual_return_est": "latest_long_short_annual_return_est",
-            "long_short_sharpe_est": "latest_long_short_sharpe_est",
-            "top_bucket_official_index_excess_annual_return_est": "latest_top_bucket_official_index_excess_annual_return_est",
-            "bucket_return_spearman": "latest_bucket_return_spearman",
-        }
-    )[[
-        "feature",
-        "latest_mean_rank_ic",
-        "latest_rank_ic_ir",
-        "latest_long_short_annual_return_est",
-        "latest_long_short_sharpe_est",
-        "latest_top_bucket_official_index_excess_annual_return_est",
-        "latest_bucket_return_spearman",
-    ]]
-    stability = stability.merge(latest_rows, on="feature", how="left")
-    stability = stability.sort_values(
-        ["positive_top_bucket_excess_year_ratio", "latest_top_bucket_official_index_excess_annual_return_est", "bucket_return_spearman_mean"],
-        ascending=False,
-    ).reset_index(drop=True)
-    stability.to_csv(cfg.output_dir / "single_factor_stability.csv", index=False)
+    evaluation, whitelist = _build_factor_evaluation(annual_report=annual_report, registry=registry)
+    evaluation.to_csv(cfg.output_dir / "factor_evaluation.csv", index=False)
+    whitelist.to_csv(cfg.output_dir / "factor_whitelist.csv", index=False)
+    evaluation.to_csv(cfg.output_dir / "single_factor_stability.csv", index=False)
 
 
 def run_family_lab_pipeline(

@@ -458,7 +458,10 @@ def compute_exposure_diagnostics(
 ) -> tuple[pd.DataFrame, dict, pd.DataFrame, dict]:
     base_cols = ["date", "symbol", "tradable_universe", "industry", "float_mv"]
     base = scored.loc[:, [col for col in base_cols if col in scored.columns]].copy()
-    base["industry"] = base.get("industry", "UNKNOWN").fillna("UNKNOWN")
+    if "industry" in base.columns:
+        base["industry"] = base["industry"].astype("string").fillna("UNKNOWN")
+    else:
+        base["industry"] = "UNKNOWN"
     base["float_mv"] = pd.to_numeric(base.get("float_mv", 0.0), errors="coerce").fillna(0.0)
     base["float_mv_clipped"] = base["float_mv"].clip(lower=1.0)
     base["float_mv_log"] = np.log(base["float_mv_clipped"])
