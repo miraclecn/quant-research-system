@@ -9,8 +9,9 @@ __pycache__/
 data/
 outputs/
 *.duckdb
-*.parquet
-*.csv
+*.db
+*.sqlite
+*.sqlite3
 
 .DS_Store
 .env
