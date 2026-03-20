@@ -18,6 +18,36 @@ OPTIONAL_DEFAULTS = {
     "is_limit_down": False,
     "in_universe": True,
 }
+FUNDAMENTAL_COLUMNS = [
+    "pe_ttm",
+    "pb",
+    "ps_ttm",
+    "dv_ttm",
+    "eps",
+    "bps",
+    "cfps",
+    "ocfps",
+    "roe",
+    "roe_dt",
+    "roa",
+    "roic",
+    "grossprofit_margin",
+    "netprofit_margin",
+    "debt_to_assets",
+    "current_ratio",
+    "quick_ratio",
+    "profit_dedt",
+    "basic_eps_yoy",
+    "dt_eps_yoy",
+    "netprofit_yoy",
+    "dt_netprofit_yoy",
+    "ocf_yoy",
+    "tr_yoy",
+    "or_yoy",
+    "q_sales_yoy",
+    "q_op_qoq",
+]
+FINA_INDICATOR_PANEL_COLUMNS = [col for col in FUNDAMENTAL_COLUMNS if col not in {"pe_ttm", "pb", "ps_ttm", "dv_ttm"}]
 DEFAULT_DUCKDB_PATH = Path("stock_data.duckdb")
 
 
@@ -44,7 +74,7 @@ def _normalize_panel(df: pd.DataFrame) -> pd.DataFrame:
         "float_mv",
         "index_weight",
         "listed_days",
-    ]
+    ] + [col for col in FUNDAMENTAL_COLUMNS if col in df.columns]
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -106,6 +136,11 @@ def _load_duckdb_panel(path: Path, index_code: str, start_date: str | None, end_
                 "SELECT COUNT(*) > 0 FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = 'index_weight'"
             ).fetchone()[0]
         )
+        has_fina_indicator_clean = bool(
+            con.execute(
+                "SELECT COUNT(*) > 0 FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = 'fina_indicator_clean'"
+            ).fetchone()[0]
+        )
         weight_cte = ""
         weight_select = "0.0 AS index_weight,\n        FALSE AS in_index_weight,\n        FALSE AS has_index_weight_table,"
         weight_join = ""
@@ -138,7 +173,32 @@ weight_dates AS (
         ON w.symbol = k.ts_code AND w.weight_date = snap.weight_date
 """
 
+        fina_select = ",\n        ".join(f"fi.{col} AS {col}" for col in FINA_INDICATOR_PANEL_COLUMNS)
+        fina_join = ""
+        if has_fina_indicator_clean:
+            fina_join = f"""
+    LEFT JOIN LATERAL (
+        SELECT
+            {", ".join(f"fic.{col} AS {col}" for col in FINA_INDICATOR_PANEL_COLUMNS)}
+        FROM fina_indicator_clean AS fic
+        WHERE fic.ts_code = k.ts_code
+          AND strptime(fic.ann_date, '%Y%m%d') <= strptime(k.trade_date, '%Y%m%d')
+        ORDER BY strptime(fic.ann_date, '%Y%m%d') DESC, strptime(fic.end_date, '%Y%m%d') DESC
+        LIMIT 1
+    ) AS fi ON TRUE
+"""
+        else:
+            fina_select = ",\n        ".join(f"CAST(NULL AS DOUBLE) AS {col}" for col in FINA_INDICATOR_PANEL_COLUMNS)
+
         cte_prefix = weight_cte + "\n" if weight_cte else ""
+        panel_from = "base"
+        panel_select = fina_select
+        panel_join = ""
+        if has_fina_indicator_clean:
+            panel_from = "base AS b"
+            panel_select = ",\n        ".join(f"fi.{col} AS {col}" for col in FINA_INDICATOR_PANEL_COLUMNS)
+            panel_join = fina_join.replace("k.ts_code", "b.symbol").replace("k.trade_date", "strftime(b.date, '%Y%m%d')")
+
         query = f"""
 WITH
 {cte_prefix}base AS (
@@ -152,6 +212,10 @@ WITH
         k.vol * 100.0 AS volume,
         k.amount * 1000.0 AS amount,
         db.turnover_rate,
+        db.pe_ttm,
+        db.pb,
+        db.ps_ttm,
+        db.dv_ttm,
         db.circ_mv * 10000.0 AS float_mv,
         COALESCE(sb.industry, 'UNKNOWN') AS industry,
         COALESCE(sb.name, '') AS name,
@@ -168,6 +232,33 @@ WITH
         ON k.ts_code = sb.ts_code
 {weight_join}
     {where_clause}
+),
+panel AS (
+    SELECT
+        b.date,
+        b.symbol,
+        b.open,
+        b.high,
+        b.low,
+        b.close,
+        b.volume,
+        b.amount,
+        b.turnover_rate,
+        b.pe_ttm,
+        b.pb,
+        b.ps_ttm,
+        b.dv_ttm,
+        b.float_mv,
+        b.industry,
+        b.name,
+        b.index_weight,
+        b.in_index_weight,
+        b.has_index_weight_table,
+        {panel_select},
+        b.listed_days,
+        b.float_mv_rank
+    FROM {panel_from}
+{panel_join}
 )
 SELECT
     date,
@@ -182,6 +273,7 @@ SELECT
     COALESCE(float_mv, 0.0) AS float_mv,
     industry,
     COALESCE(index_weight, 0.0) AS index_weight,
+    {", ".join(FUNDAMENTAL_COLUMNS)},
     name LIKE 'ST%%' OR name LIKE '*ST%%' OR name LIKE 'S*ST%%' AS is_st,
     listed_days,
     FALSE AS is_paused,
@@ -197,7 +289,7 @@ SELECT
         WHEN has_index_weight_table THEN in_index_weight
         ELSE float_mv_rank BETWEEN 801 AND 1800
     END AS in_universe
-FROM base
+FROM panel
 """
         df = con.execute(query, params).df()
     return _normalize_panel(df)

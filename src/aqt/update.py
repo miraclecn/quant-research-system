@@ -64,6 +64,18 @@ class IndexDailyUpdateSummary:
 
 
 @dataclass(slots=True)
+class FinaIndicatorRebuildSummary:
+    db_path: Path
+    stock_count: int
+    start_date: str | None
+    end_date: str | None
+    before: TableStatus
+    after: TableStatus
+    dropped_legacy_fina_indicator: bool
+    fetched_rows: int
+
+
+@dataclass(slots=True)
 class PruneRecommendation:
     table: str
     action: str
@@ -380,6 +392,206 @@ CREATE TABLE IF NOT EXISTS index_daily (
     )
 
 
+def _refresh_fina_indicator_clean_table(con: duckdb.DuckDBPyConnection) -> None:
+    raw_exists = con.execute(
+        "SELECT COUNT(*) > 0 FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = 'fina_indicator_raw_v2'"
+    ).fetchone()[0]
+    if not raw_exists:
+        return
+
+    raw_df = con.execute("SELECT * FROM fina_indicator_raw_v2").fetchdf()
+    if raw_df.empty:
+        con.execute("DROP VIEW IF EXISTS fina_indicator_clean")
+        con.execute("DROP TABLE IF EXISTS fina_indicator_clean")
+        con.execute(
+            """
+CREATE TABLE fina_indicator_clean (
+    ts_code VARCHAR,
+    ann_date VARCHAR,
+    end_date VARCHAR,
+    update_flag INTEGER
+)
+"""
+        )
+        return
+
+    raw_df["update_flag"] = pd.to_numeric(raw_df["update_flag"], errors="coerce").fillna(0).astype("int32")
+    numeric_columns = [col for col in raw_df.columns if col not in {"ts_code", "ann_date", "end_date", "update_flag"}]
+    for col in numeric_columns:
+        raw_df[col] = pd.to_numeric(raw_df[col], errors="coerce").astype("float32")
+
+    clean_df = (
+        raw_df.sort_values(["ts_code", "ann_date", "end_date", "update_flag"], ascending=[True, True, True, False])
+        .drop_duplicates(subset=["ts_code", "ann_date", "end_date"], keep="first")
+        .reset_index(drop=True)
+    )
+
+    con.execute("DROP VIEW IF EXISTS fina_indicator_clean")
+    con.execute("DROP TABLE IF EXISTS fina_indicator_clean")
+    con.register("fina_indicator_clean_frame", clean_df)
+    con.execute("CREATE TABLE fina_indicator_clean AS SELECT * FROM fina_indicator_clean_frame")
+    con.unregister("fina_indicator_clean_frame")
+
+
+def _fetch_fina_indicator(
+    pro,
+    ts_code: str,
+    start_date: str | None,
+    end_date: str | None,
+    fields: str,
+) -> pd.DataFrame:
+    params = {"ts_code": ts_code}
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+    df = _call_tushare(lambda: pro.fina_indicator(fields=fields, **params), min_interval_sec=0.40)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    for col in out.columns:
+        out[col] = out[col].astype("string")
+    return out.drop_duplicates().reset_index(drop=True)
+
+
+def _resolve_fina_indicator_fields(
+    con: duckdb.DuckDBPyConnection,
+    pro,
+    stock_codes: list[str],
+    start_date: str | None,
+    end_date: str | None,
+) -> list[str]:
+    legacy_exists = con.execute(
+        "SELECT COUNT(*) > 0 FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = 'fina_indicator'"
+    ).fetchone()[0]
+    if legacy_exists:
+        columns = [
+            row[0]
+            for row in con.execute(
+                """
+SELECT column_name
+FROM information_schema.columns
+WHERE table_name = 'fina_indicator'
+ORDER BY ordinal_position
+"""
+            ).fetchall()
+        ]
+        if "update_flag" not in columns:
+            columns.append("update_flag")
+        return columns
+
+    for ts_code in stock_codes[:20]:
+        sample = _call_tushare(
+            lambda ts_code=ts_code: pro.fina_indicator(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+            ),
+            min_interval_sec=0.40,
+        )
+        if sample is not None and not sample.empty:
+            columns = sample.columns.astype(str).tolist()
+            if "update_flag" not in columns:
+                columns.append("update_flag")
+            return columns
+
+    raise ValueError("Unable to infer fina_indicator fields from local schema or Tushare sample response.")
+
+
+def _ensure_fina_indicator_raw_v2_table(con: duckdb.DuckDBPyConnection, columns: list[str]) -> None:
+    column_defs = []
+    for col in columns:
+        if col == "update_flag":
+            column_defs.append(f"{col} VARCHAR")
+        else:
+            column_defs.append(f"{col} VARCHAR")
+    columns_sql = ",\n    ".join(column_defs)
+    con.execute(
+        f"""
+CREATE TABLE IF NOT EXISTS fina_indicator_raw_v2 (
+    {columns_sql}
+)
+"""
+    )
+
+
+def rebuild_fina_indicator(
+    db_path: Path,
+    tushare_token: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit_stocks: int | None = None,
+    drop_legacy: bool = True,
+) -> FinaIndicatorRebuildSummary:
+    token = tushare_token or os.getenv("TUSHARE_TOKEN")
+    if not token:
+        raise ValueError("Missing Tushare token. Pass --tushare-token or set TUSHARE_TOKEN.")
+
+    with duckdb.connect(str(db_path)) as con:
+        before = _fetch_status(con, "fina_indicator_raw_v2", "ann_date")
+        stock_codes = [
+            row[0]
+            for row in con.execute(
+                "SELECT DISTINCT ts_code FROM stock_basic WHERE ts_code IS NOT NULL ORDER BY ts_code"
+            ).fetchall()
+        ]
+        if limit_stocks is not None:
+            stock_codes = stock_codes[:limit_stocks]
+
+    pro = _get_tushare_pro(token)
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        fields = ",".join(_resolve_fina_indicator_fields(con, pro, stock_codes, start_date, end_date))
+    fetched_rows = 0
+    initialized = False
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute("DROP VIEW IF EXISTS fina_indicator_clean")
+        con.execute("DROP TABLE IF EXISTS fina_indicator_clean")
+        con.execute("DROP TABLE IF EXISTS fina_indicator_raw_v2")
+
+    for ts_code in stock_codes:
+        df = _fetch_fina_indicator(pro, ts_code=ts_code, start_date=start_date, end_date=end_date, fields=fields)
+        if df.empty:
+            continue
+
+        if not initialized:
+            with duckdb.connect(str(db_path)) as con:
+                _ensure_fina_indicator_raw_v2_table(con, df.columns.tolist())
+            initialized = True
+
+        with duckdb.connect(str(db_path)) as con:
+            _upsert_frame(
+                con,
+                "fina_indicator_raw_v2",
+                df,
+                key_columns=["ts_code", "ann_date", "end_date", "update_flag"],
+            )
+        fetched_rows += len(df)
+
+    with duckdb.connect(str(db_path)) as con:
+        if initialized:
+            _refresh_fina_indicator_clean_table(con)
+        dropped_legacy = False
+        legacy_exists = con.execute(
+            "SELECT COUNT(*) > 0 FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = 'fina_indicator'"
+        ).fetchone()[0]
+        if drop_legacy and legacy_exists:
+            con.execute("DROP TABLE fina_indicator")
+            dropped_legacy = True
+        after = _fetch_status(con, "fina_indicator_raw_v2", "ann_date")
+
+    return FinaIndicatorRebuildSummary(
+        db_path=db_path,
+        stock_count=len(stock_codes),
+        start_date=start_date,
+        end_date=end_date,
+        before=before,
+        after=after,
+        dropped_legacy_fina_indicator=dropped_legacy,
+        fetched_rows=fetched_rows,
+    )
+
+
 def _upsert_frame(
     con: duckdb.DuckDBPyConnection,
     table: str,
@@ -642,6 +854,22 @@ def format_index_daily_update_summary(summary: IndexDailyUpdateSummary) -> str:
             f"after_max={summary.after.max_date} "
             f"fetched_rows={summary.fetched_rows}"
         ),
+    ]
+    return "\n".join(lines)
+
+
+def format_fina_indicator_rebuild_summary(summary: FinaIndicatorRebuildSummary) -> str:
+    lines = [
+        f"db_path={summary.db_path}",
+        f"stocks={summary.stock_count}",
+        f"window start={summary.start_date} end={summary.end_date}",
+        (
+            "fina_indicator_raw_v2 "
+            f"before_max={summary.before.max_date} "
+            f"after_max={summary.after.max_date} "
+            f"fetched_rows={summary.fetched_rows}"
+        ),
+        f"dropped_legacy_fina_indicator={summary.dropped_legacy_fina_indicator}",
     ]
     return "\n".join(lines)
 

@@ -9,10 +9,12 @@ from aqt.pipeline import ensure_default_dirs, run_factor_chain_pipeline, run_fam
 from aqt.update import (
     build_prune_plan,
     execute_prune_plan,
+    format_fina_indicator_rebuild_summary,
     format_index_daily_update_summary,
     format_index_weight_update_summary,
     format_prune_plan,
     format_update_summary,
+    rebuild_fina_indicator,
     update_index_daily,
     update_index_weight,
     update_raw,
@@ -23,7 +25,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="A-share daily research starter")
     parser.add_argument(
         "command",
-        choices=["run", "research-run", "factor-chain-run", "single-factor-run", "family-lab", "export-panel", "update-raw", "update-index-weight", "update-index-daily", "prune-db", "daily-research"],
+        choices=["run", "research-run", "factor-chain-run", "single-factor-run", "family-lab", "export-panel", "update-raw", "update-index-weight", "update-index-daily", "rebuild-fina-indicator", "prune-db", "daily-research"],
         help="Workflow command",
     )
     parser.add_argument("--input", dest="input_path", help="Input panel path")
@@ -32,6 +34,7 @@ def main() -> None:
     parser.add_argument("--execute", action="store_true", help="Apply destructive actions for prune-db")
     parser.add_argument("--lookback-days", type=int, default=7, help="Refresh overlap window for update-raw")
     parser.add_argument("--tushare-token", dest="tushare_token", help="Tushare token for update-raw")
+    parser.add_argument("--limit-stocks", type=int, help="Limit stock count for full-table rebuild smoke tests")
     parser.add_argument("--index-code", dest="index_code", help="Index code for constituent membership, e.g. 000852.SH")
     parser.add_argument("--start-date", dest="start_date", help="Inclusive start date, e.g. 2021-01-01")
     parser.add_argument("--end-date", dest="end_date", help="Inclusive end date, e.g. 2025-12-31")
@@ -242,6 +245,16 @@ def main() -> None:
         db_path = cfg.data.input_path if cfg.data.input_path.suffix == ".duckdb" else Path("stock_data.duckdb")
         plan = execute_prune_plan(db_path=db_path) if args.execute else build_prune_plan(db_path=db_path)
         print(format_prune_plan(plan))
+    elif args.command == "rebuild-fina-indicator":
+        db_path = cfg.data.input_path if cfg.data.input_path.suffix == ".duckdb" else Path("stock_data.duckdb")
+        summary = rebuild_fina_indicator(
+            db_path=db_path,
+            tushare_token=args.tushare_token,
+            start_date=cfg.data.start_date,
+            end_date=cfg.data.end_date,
+            limit_stocks=args.limit_stocks,
+        )
+        print(format_fina_indicator_rebuild_summary(summary))
     elif args.command == "update-index-weight":
         db_path = cfg.data.input_path if cfg.data.input_path.suffix == ".duckdb" else Path("stock_data.duckdb")
         summary = update_index_weight(
