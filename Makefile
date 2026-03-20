@@ -13,7 +13,7 @@ TEST_MONTHS ?= 12
 STEP_MONTHS ?= 12
 LOOKBACK_DAYS ?= 7
 
-.PHONY: help install run research-run factor-chain single-factor family-sma family-reversal export-panel update-raw update-index-weight update-index-daily daily-research check-daily status
+.PHONY: help install run research-run factor-chain single-factor family-sma family-reversal export-panel update-raw update-index-weight update-index-daily daily-research check-daily status snapshot
 
 help:
 	@printf '%s\n' \
@@ -31,7 +31,8 @@ help:
 	'  make update-index-daily   Refresh official index daily bars' \
 	'  make daily-research       Run the one-shot daily workflow' \
 	'  make check-daily          Check daily output health' \
-	'  make status               Show git status and recent commits'
+	'  make status               Show git status and recent commits' \
+	'  make snapshot             Show git and artifact snapshot'
 
 install:
 	$(PYTHON) -m pip install -e .
@@ -92,3 +93,6 @@ check-daily:
 status:
 	git status --short --branch
 	git log --oneline --decorate -n 5
+
+snapshot:
+	bash scripts/status_snapshot.sh
