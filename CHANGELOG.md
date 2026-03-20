@@ -10,6 +10,8 @@
 - added [`Makefile`](Makefile) with common workflow entrypoints
 - added [`docs/project-status.md`](docs/project-status.md) to summarize current scope and baseline
 - added [`scripts/status_snapshot.sh`](scripts/status_snapshot.sh) to print git and artifact status in one command
+- added [`docs/research-notes.md`](docs/research-notes.md) to capture current research readouts
+- added [`scripts/generate_summary.sh`](scripts/generate_summary.sh) to generate a shareable markdown status summary
 
 ### Notes
 

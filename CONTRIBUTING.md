@@ -49,6 +49,7 @@ Do not track:
 ```bash
 make help
 make snapshot
+make summary
 git status
 git log --oneline --decorate -n 20
 git diff
