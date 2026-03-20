@@ -68,6 +68,7 @@ def main() -> None:
     parser.add_argument("--factor-core-quantile", type=float, help="Quantile threshold for tagging factors as core")
     parser.add_argument("--factor-candidate-quantile", type=float, help="Quantile threshold for tagging factors as candidate")
     parser.add_argument("--factor-fallback-top-n", type=int, help="Fallback number of top quality-score factors used when whitelist is empty")
+    parser.add_argument("--factor-batch-size", type=int, help="Number of factors evaluated per batch for single-factor research")
     parser.add_argument("--ridge-min-selection-rate-multi-split", type=float, help="Minimum Ridge selection rate when there are multiple rolling splits")
     parser.add_argument("--ridge-min-selection-rate-single-split", type=float, help="Minimum Ridge selection rate when there is only one split")
     parser.add_argument("--ridge-max-original-coef-cv", type=float, help="Maximum Ridge original coefficient CV for passing the Ridge gate")
@@ -134,6 +135,8 @@ def main() -> None:
         cfg.train.factor_eval.candidate_quantile = args.factor_candidate_quantile
     if args.factor_fallback_top_n is not None:
         cfg.train.factor_eval.fallback_top_n = args.factor_fallback_top_n
+    if args.factor_batch_size is not None:
+        cfg.train.factor_eval.feature_batch_size = args.factor_batch_size
     if args.ridge_min_selection_rate_multi_split is not None:
         cfg.train.factor_eval.ridge_min_selection_rate_multi_split = args.ridge_min_selection_rate_multi_split
     if args.ridge_min_selection_rate_single_split is not None:

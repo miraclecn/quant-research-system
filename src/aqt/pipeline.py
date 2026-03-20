@@ -120,6 +120,32 @@ def _read_csv_or_empty(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _iter_feature_batches(features: list[str], batch_size: int) -> list[list[str]]:
+    if not features:
+        return []
+    size = max(1, int(batch_size or len(features)))
+    return [features[idx: idx + size] for idx in range(0, len(features), size)]
+
+
+def _summarize_feature_diagnostics_batched(
+    panel: pd.DataFrame,
+    features: list[str],
+    target_col: str,
+    batch_size: int,
+) -> pd.DataFrame:
+    diagnostics_frames: list[pd.DataFrame] = []
+    for feature_batch in _iter_feature_batches(features, batch_size):
+        batch_panel = add_features(panel, feature_batch)
+        batch_diagnostics = summarize_feature_diagnostics(batch_panel, feature_batch, target_col)
+        if not batch_diagnostics.empty:
+            diagnostics_frames.append(batch_diagnostics)
+        del batch_panel
+        gc.collect()
+    if not diagnostics_frames:
+        return pd.DataFrame()
+    return pd.concat(diagnostics_frames, ignore_index=True)
+
+
 def _build_factor_evaluation(
     annual_report: pd.DataFrame,
     registry: pd.DataFrame,
@@ -247,17 +273,23 @@ def _run_single_factor_evaluation(
     output_dir.mkdir(parents=True, exist_ok=True)
     registry = build_factor_registry(features)
     registry.to_csv(output_dir / "factor_registry.csv", index=False)
+    batch_size = cfg.train.factor_eval.feature_batch_size
 
     annual_rows: list[dict] = []
     years = sorted(panel["date"].dt.year.unique().tolist())
     for year in years:
-        year_df = panel.loc[panel["date"].dt.year == year].copy()
-        if year_df.empty:
+        year_base = panel.loc[panel["date"].dt.year == year].copy()
+        if year_base.empty:
             continue
 
         year_dir = output_dir / str(year)
         year_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics = summarize_feature_diagnostics(year_df, features, target_col)
+        diagnostics = _summarize_feature_diagnostics_batched(
+            year_base,
+            features,
+            target_col,
+            batch_size,
+        )
         if diagnostics.empty:
             continue
 
@@ -280,7 +312,8 @@ def _run_single_factor_evaluation(
             feature = row["feature"]
             direction = int(row["direction"])
             standardized_col = f"{feature}_sf_score"
-            scored = winsorize_and_zscore_by_date(year_df, feature, standardized_col)
+            feature_panel = add_features(year_base, [feature])
+            scored = winsorize_and_zscore_by_date(feature_panel, feature, standardized_col)
             if direction < 0:
                 scored[standardized_col] = scored[standardized_col] * -1.0
 
@@ -339,12 +372,17 @@ def _run_single_factor_evaluation(
             }
             year_report_rows.append(report_row)
             annual_rows.append(report_row)
+            del feature_panel
+            del scored
+            gc.collect()
 
         if year_report_rows:
             pd.DataFrame(year_report_rows).sort_values(
                 ["mean_rank_ic", "long_short_annual_return_est"],
                 ascending=False,
             ).to_csv(year_dir / "single_factor_report.csv", index=False)
+        del year_base
+        gc.collect()
 
     annual_report = pd.DataFrame(annual_rows)
     if annual_report.empty:
@@ -532,7 +570,6 @@ def run_pipeline(cfg: AppConfig) -> None:
         start_date=cfg.data.start_date,
         end_date=cfg.data.end_date,
     )
-    panel = add_features(panel)
     panel = add_labels(panel, cfg.labels.primary_horizon, cfg.labels.secondary_horizon)
     panel = apply_universe_filters(panel, cfg.data)
 
@@ -667,7 +704,6 @@ def run_research_pipeline(
         start_date=cfg.data.start_date,
         end_date=cfg.data.end_date,
     )
-    panel = add_features(panel)
     panel = add_labels(panel, cfg.labels.primary_horizon, cfg.labels.secondary_horizon)
     panel = apply_universe_filters(panel, cfg.data)
 
@@ -895,7 +931,6 @@ def run_factor_chain_pipeline(
         start_date=cfg.data.start_date,
         end_date=cfg.data.end_date,
     )
-    panel = add_features(panel)
     panel = add_labels(panel, cfg.labels.primary_horizon, cfg.labels.secondary_horizon)
     panel = apply_universe_filters(panel, cfg.data)
 
@@ -911,11 +946,7 @@ def run_factor_chain_pipeline(
         "industry",
         "float_mv",
         target_col,
-        *all_features,
     ]
-
-    modeling = panel.loc[panel["tradable_universe"]].copy()
-    modeling = modeling[["date", "symbol", "tradable_universe", target_col, *all_features]].dropna(subset=[target_col]).reset_index(drop=True)
 
     step_months = step_months or valid_months
     research_start_ts = pd.Timestamp(research_start)
@@ -936,12 +967,14 @@ def run_factor_chain_pipeline(
         if test_end_ts > research_end_ts + pd.Timedelta(days=1):
             break
 
-        train_df = modeling.loc[
-            (modeling["date"] >= train_start_ts) & (modeling["date"] < train_end_ts)
+        split_train_panel = panel.loc[
+            (panel["date"] >= train_start_ts) & (panel["date"] < train_end_ts)
         ].copy()
-        eval_df = modeling.loc[
-            (modeling["date"] >= valid_start_ts) & (modeling["date"] < test_end_ts)
+        split_eval_panel = panel.loc[
+            (panel["date"] >= valid_start_ts) & (panel["date"] < test_end_ts)
         ].copy()
+        train_df = split_train_panel.loc[split_train_panel["tradable_universe"]].dropna(subset=[target_col]).reset_index(drop=True)
+        eval_df = split_eval_panel.loc[split_eval_panel["tradable_universe"]].dropna(subset=[target_col]).reset_index(drop=True)
         if len(train_df) < cfg.train.min_train_rows or eval_df.empty:
             cursor = cursor + pd.DateOffset(months=step_months)
             split_id += 1
@@ -952,9 +985,6 @@ def run_factor_chain_pipeline(
         split_cfg = replace(cfg, output_dir=split_dir)
 
         factor_eval_dir = split_dir / "factor_research"
-        split_train_panel = panel.loc[
-            (panel["date"] >= train_start_ts) & (panel["date"] < train_end_ts)
-        ].copy()
         _, factor_evaluation, factor_whitelist = _run_single_factor_evaluation(
             panel=split_train_panel,
             features=all_features,
@@ -982,6 +1012,8 @@ def run_factor_chain_pipeline(
             split_id += 1
             continue
 
+        selected_feature_names = whitelist_candidates["feature"].tolist()
+        train_feature_panel = add_features(train_df, selected_feature_names)
         selected_features = whitelist_candidates[[
             "feature",
             "direction",
@@ -1000,7 +1032,11 @@ def run_factor_chain_pipeline(
                 "mean_top_bottom_spread_mean": "train_mean_top_bottom_spread",
             }
         ).copy()
-        train_feature_diagnostics = summarize_feature_diagnostics(train_df, selected_features["feature"].tolist(), target_col)
+        train_feature_diagnostics = summarize_feature_diagnostics(
+            train_feature_panel,
+            selected_features["feature"].tolist(),
+            target_col,
+        )
         train_feature_diagnostics.to_csv(split_dir / "feature_diagnostics_train.csv", index=False)
         selected_features = selected_features.loc[
             selected_features["train_mean_rank_ic"].abs().fillna(0.0) >= factor_min_rank_ic
@@ -1024,15 +1060,18 @@ def run_factor_chain_pipeline(
                     "mean_top_bottom_spread_mean": "train_mean_top_bottom_spread",
                 }
             ).copy()
-        selected_features = _deduplicate_selected_features(train_df, selected_features, factor_max_corr)
+        selected_features = _deduplicate_selected_features(train_feature_panel, selected_features, factor_max_corr)
         if selected_features.empty:
             cursor = cursor + pd.DateOffset(months=step_months)
             split_id += 1
             continue
 
+        selected_feature_names = selected_features["feature"].tolist()
+        train_feature_panel = add_features(train_df, selected_feature_names)
+        eval_feature_panel = add_features(eval_df, selected_feature_names)
         selected_features.to_csv(split_dir / "selected_features.csv", index=False)
-        train_oriented, oriented_features = _apply_feature_directions(train_df, selected_features)
-        eval_oriented, _ = _apply_feature_directions(eval_df, selected_features)
+        train_oriented, oriented_features = _apply_feature_directions(train_feature_panel, selected_features)
+        eval_oriented, _ = _apply_feature_directions(eval_feature_panel, selected_features)
         outputs = fit_predict_models(
             train_df=train_oriented,
             test_df=eval_oriented,
@@ -1042,7 +1081,7 @@ def run_factor_chain_pipeline(
             lgbm_cfg=cfg.train.lgbm,
         )
 
-        pred_df = eval_df[["date", "symbol", "tradable_universe"]].copy()
+        pred_df = eval_feature_panel[["date", "symbol", "tradable_universe", *selected_feature_names]].copy()
         pred_df["ridge_score"] = outputs.ridge_pred.astype("float32")
         pred_df["lgbm_score"] = outputs.lgbm_pred.astype("float32")
 
@@ -1055,14 +1094,13 @@ def run_factor_chain_pipeline(
             continue
 
         feature_importance = summarize_feature_importance(
-            selected_features["feature"].tolist(),
+            selected_feature_names,
             [outputs.ridge_coef],
             [outputs.lgbm_feature_importance],
         )
         feature_importance.to_csv(split_dir / "feature_importance_summary.csv", index=False)
         ridge_coefficients = summarize_ridge_coefficients(selected_features, outputs.ridge_coef)
         ridge_coefficients.to_csv(split_dir / "ridge_coefficients.csv", index=False)
-        selected_feature_names = selected_features["feature"].tolist()
         summarize_feature_diagnostics(valid_merged, selected_feature_names, target_col).to_csv(
             split_dir / "feature_diagnostics_valid.csv", index=False
         )
@@ -1092,6 +1130,20 @@ def run_factor_chain_pipeline(
         }
         save_metrics(split_metrics, split_dir / "research_metrics.json")
         split_results.append({"split_id": split_id, **split_metrics})
+
+        del split_train_panel
+        del split_eval_panel
+        del train_df
+        del eval_df
+        del train_feature_panel
+        del eval_feature_panel
+        del train_oriented
+        del eval_oriented
+        del pred_df
+        del merged
+        del valid_merged
+        del test_merged
+        gc.collect()
 
         cursor = cursor + pd.DateOffset(months=step_months)
         split_id += 1
@@ -1246,7 +1298,6 @@ def run_single_factor_pipeline(
         start_date=cfg.data.start_date,
         end_date=cfg.data.end_date,
     )
-    panel = add_features(panel)
     panel = add_labels(panel, cfg.labels.primary_horizon, cfg.labels.secondary_horizon)
     panel = apply_universe_filters(panel, cfg.data)
     panel = panel.loc[

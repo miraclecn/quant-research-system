@@ -84,6 +84,7 @@ class FactorEvalConfig:
     core_quantile: float = 0.80
     candidate_quantile: float = 0.50
     fallback_top_n: int = 20
+    feature_batch_size: int = 16
     ridge_min_selection_rate_multi_split: float = 0.50
     ridge_min_selection_rate_single_split: float = 1.0
     ridge_max_original_coef_cv: float = 1.5
