@@ -58,8 +58,8 @@ DuckDB tables observed on 2026-03-21:
 ## Current research direction
 
 - 2024 single-factor screening currently favors long-horizon trend and price-position signals over the first batch of fundamental factors
-- the 2025 execution matrix suggests `20d` label plus biweekly execution is the strongest current candidate for that factor pool
-- the same matrix also shows the `20d_biweekly` uplift is concentrated more in `H2 2025` than in `H1 2025`, so the setup is promising but not yet regime-stable
+- the corrected 2025 execution matrix does not support replacing the weekly baseline with `20d_biweekly`
+- `10d_weekly` is currently the strongest observed default in the corrected matrix, while `20d_biweekly` remains more regime-sensitive and materially stronger in `H2 2025` than in `H1 2025`
 
 ## Working conventions
 

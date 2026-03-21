@@ -81,29 +81,28 @@ From `outputs/single-factor-2024-formal/factor_whitelist.csv`:
 
 From `outputs/2025-horizon-matrix/summary.csv`:
 
-- `10d_weekly` and `20d_weekly` are both workable for `lgbm`, but neither is clearly better than the other
-- `20d_biweekly` is much stronger than both weekly variants for `lgbm`
-- the current best observed `lgbm` result in this matrix is roughly:
-  - annual return `96.9%`
-  - Sharpe `2.38`
-  - max drawdown `-11.3%`
-  - official index excess annual return `80.0%`
+- after correcting the annualization logic for biweekly returns, `20d_biweekly` is still positive but no longer dominates in the extreme way first observed
+- `10d_weekly` and `20d_weekly` are both strong for `lgbm`
+- the corrected matrix now reads roughly:
+  - `10d_weekly`: annual return `88.8%`, Sharpe `2.33`
+  - `20d_weekly`: annual return `68.4%`, Sharpe `2.16`
+  - `20d_biweekly`: annual return `40.5%`, Sharpe `1.40`
 
 Interpretation:
 
-- the current 2024 factor set behaves more like a slow signal set than a weekly trading signal set
-- changing label horizon from `10d` to `20d` alone is not enough
-- slowing execution to biweekly matters much more for this factor pool than just extending the label horizon
+- the first `20d_biweekly` jump was materially overstated by a metrics bug
+- the corrected results do not support the claim that `20d_biweekly` is decisively better than weekly execution
+- at the moment `10d_weekly` remains the strongest observed default in this matrix
 
 From `outputs/2025-horizon-matrix/20d_biweekly/period_split_summary.csv`:
 
 - the `20d_biweekly` uplift is not evenly distributed through the year
-- `lgbm` in `H1 2025` is only mildly positive, with annualized return about `5.4%` and Sharpe about `0.12`
-- `lgbm` in `H2 2025` is much stronger, with annualized return about `243.5%` and Sharpe about `6.63`
+- `lgbm` in `H1 2025` is only mildly positive, with annualized return about `2.7%` and Sharpe about `0.09`
+- `lgbm` in `H2 2025` is much stronger, with annualized return about `85.7%` and Sharpe about `3.30`
 
 Interpretation:
 
-- `20d_biweekly` is the best current candidate, but it is not yet proven regime-stable
+- `20d_biweekly` is not a bad configuration, but its edge is not stable enough to replace the weekly baseline
 - any move toward this configuration should include at least one more stability pass, such as split-half or rolling-year validation
 
 ## Current working default

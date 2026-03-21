@@ -40,4 +40,5 @@ When a change materially affects workflow, data assumptions, research direction,
 ### Notes
 
 - the current Python environment still cannot run LightGBM GPU training: a real fit attempt fails with `No OpenCL device found`
-- the current best observed setup in the 2025 matrix is `20d_biweekly`, but its strength is concentrated in `H2 2025`, so it should not yet be treated as a stable production default
+- an annualization bug in `src/aqt/backtest.py` was later identified: biweekly portfolios had been annualized as if they were weekly
+- after correcting that bug, `20d_biweekly` remains usable but no longer dominates the weekly baselines
