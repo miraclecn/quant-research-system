@@ -89,7 +89,8 @@ This workflow is now organized as:
 - `factor_evaluation.csv`: unified single-factor evaluation table
 - `factor_whitelist.csv`: factors passing the single-factor gate
 - `ridge_screen.csv`: whitelist factors re-screened by rolling Ridge stability
-- `lgbm_feature_pool.csv`: final feature pool handed to LightGBM research
+- split-level `lgbm_selected_features.csv`: Ridge-filtered feature subset actually handed to LightGBM in each split
+- `lgbm_feature_pool.csv`: cross-split summary of factors actually used by LightGBM research
 
 Key evaluation knobs can now be tuned from the CLI, for example:
 
@@ -194,5 +195,5 @@ For `factor-chain-run`, the top-level output directory also includes:
 - `aqt prune-db --execute` applies that drop list to the database. Run a filesystem backup first if you want rollback.
 - `aqt export-panel` lets you materialize a research-ready `parquet` file and keep `duckdb` as the raw source of truth.
 - `aqt single-factor-run` is now the unified factor evaluation entrypoint and should be treated as the only source of truth for factor quality gates.
-- `aqt factor-chain-run` now consumes `factor_whitelist.csv` from the unified single-factor evaluation flow instead of using an independent ad hoc factor scoring rule.
+- `aqt factor-chain-run` now consumes `factor_whitelist.csv` from the unified single-factor evaluation flow, then applies a split-level Ridge gate before LightGBM training.
 - You should tighten the execution model before going live, especially around limit-up, limit-down, suspensions, and order sizing.

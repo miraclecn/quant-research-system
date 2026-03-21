@@ -20,7 +20,10 @@ This repository is a local A-share daily cross-sectional research system centere
 - raw store: `stock_data.duckdb`
 - default panel path: `data/daily_bars.parquet`
 - default output root: `outputs/`
-- unified factor research chain: `factor_registry -> factor_evaluation -> factor_whitelist -> ridge_screen -> lgbm_feature_pool`
+- unified factor research chain: `factor_registry -> factor_evaluation -> factor_whitelist -> split-level Ridge gate -> LightGBM`
+- split outputs now distinguish:
+  - `selected_features.csv`: pre-Ridge candidate set
+  - `lgbm_selected_features.csv`: Ridge-filtered feature set actually used by LightGBM
 - current execution comparison baseline: `outputs/2025-horizon-matrix`
 
 ## Main workflows

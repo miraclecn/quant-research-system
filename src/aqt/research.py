@@ -101,6 +101,42 @@ def summarize_selected_feature_frequency(output_dir: Path, split_ids: list[int])
     ).reset_index(drop=True)
 
 
+def summarize_lgbm_selected_feature_frequency(output_dir: Path, split_ids: list[int]) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    for split_id in split_ids:
+        path = output_dir / f"split_{split_id:02d}" / "lgbm_selected_features.csv"
+        if not path.exists():
+            continue
+        df = pd.read_csv(path)
+        if df.empty:
+            continue
+        df = df.copy()
+        df["split_id"] = split_id
+        rows.append(df)
+
+    if not rows:
+        return pd.DataFrame()
+
+    combined = pd.concat(rows, ignore_index=True)
+    split_count = int(combined["split_id"].nunique())
+    summary = (
+        combined.groupby("feature", observed=False)
+        .agg(
+            lgbm_selection_count=("split_id", "nunique"),
+            lgbm_selection_score_mean=("ridge_split_score", "mean"),
+            lgbm_selection_quality_score_mean=("quality_score", "mean"),
+            ridge_oriented_abs_coef_mean=("ridge_oriented_abs_coef", "mean"),
+            ridge_oriented_positive_ratio=("ridge_oriented_positive", "mean"),
+        )
+        .reset_index()
+    )
+    summary["lgbm_selection_rate"] = summary["lgbm_selection_count"] / split_count
+    return summary.sort_values(
+        ["lgbm_selection_count", "lgbm_selection_score_mean", "ridge_oriented_abs_coef_mean"],
+        ascending=False,
+    ).reset_index(drop=True)
+
+
 def summarize_ridge_coefficient_stability(output_dir: Path, split_ids: list[int]) -> pd.DataFrame:
     rows: list[pd.DataFrame] = []
     for split_id in split_ids:

@@ -11,7 +11,7 @@ from aqt.config import AppConfig
 from aqt.data import load_panel
 from aqt.features import FEATURE_COLUMNS, add_features, build_factor_registry
 from aqt.labels import add_labels
-from aqt.models import fit_predict_models
+from aqt.models import fit_predict_models, fit_predict_ridge
 from aqt.research import (
     build_universe_benchmark_positions,
     compare_to_benchmark,
@@ -25,6 +25,7 @@ from aqt.research import (
     summarize_official_index_benchmark,
     summarize_feature_diagnostics,
     summarize_feature_importance,
+    summarize_lgbm_selected_feature_frequency,
     summarize_ridge_coefficients,
     summarize_ridge_coefficient_stability,
     summarize_selected_feature_frequency,
@@ -477,6 +478,34 @@ def _deduplicate_selected_features(
             kept_features.append(feature)
 
     return pd.DataFrame(keep_rows, columns=selected_features.columns)
+
+
+def _build_split_lgbm_feature_pool(
+    ridge_coefficients: pd.DataFrame,
+    cfg: AppConfig,
+) -> pd.DataFrame:
+    if ridge_coefficients.empty:
+        return pd.DataFrame(columns=[*ridge_coefficients.columns, "ridge_split_score", "pass_ridge_gate"])
+
+    pool = ridge_coefficients.copy()
+    pool["ridge_split_score"] = (
+        0.60 * _safe_rank(pool["ridge_oriented_abs_coef"], ascending=True)
+        + 0.25 * _safe_rank(pool["train_rank_ic_ir"].abs(), ascending=True)
+        + 0.15 * pool["ridge_oriented_positive"].astype(float)
+    )
+    score_cutoff = pool["ridge_split_score"].quantile(cfg.train.factor_eval.ridge_split_keep_quantile)
+    pool["pass_ridge_gate"] = pool["ridge_split_score"] >= score_cutoff
+    if not pool["pass_ridge_gate"].any():
+        fallback_n = max(1, min(cfg.train.factor_eval.ridge_split_fallback_top_n, max(1, len(pool) // 2)))
+        fallback_idx = pool.sort_values(
+            ["ridge_split_score", "ridge_oriented_abs_coef", "quality_score"],
+            ascending=False,
+        ).head(fallback_n).index
+        pool.loc[fallback_idx, "pass_ridge_gate"] = True
+    return pool.sort_values(
+        ["pass_ridge_gate", "ridge_split_score", "ridge_oriented_abs_coef", "quality_score"],
+        ascending=[False, False, False, False],
+    ).reset_index(drop=True)
 
 
 def _run_strategy(
@@ -1072,16 +1101,46 @@ def run_factor_chain_pipeline(
         selected_features.to_csv(split_dir / "selected_features.csv", index=False)
         train_oriented, oriented_features = _apply_feature_directions(train_feature_panel, selected_features)
         eval_oriented, _ = _apply_feature_directions(eval_feature_panel, selected_features)
-        outputs = fit_predict_models(
+        _, screening_ridge_coef = fit_predict_ridge(
             train_df=train_oriented,
             test_df=eval_oriented,
             features=oriented_features,
             target_col=target_col,
             random_state=cfg.train.random_state,
+        )
+        ridge_coefficients = summarize_ridge_coefficients(selected_features, screening_ridge_coef)
+        lgbm_selected_features = _build_split_lgbm_feature_pool(ridge_coefficients, split_cfg)
+        lgbm_selected_features.to_csv(split_dir / "lgbm_selected_features.csv", index=False)
+        lgbm_selected_features = lgbm_selected_features.loc[lgbm_selected_features["pass_ridge_gate"]].copy()
+        if lgbm_selected_features.empty:
+            cursor = cursor + pd.DateOffset(months=step_months)
+            split_id += 1
+            continue
+
+        lgbm_feature_names = lgbm_selected_features["feature"].tolist()
+        lgbm_selected_metadata = lgbm_selected_features[[
+            "feature",
+            "direction",
+            "sign_flipped",
+            "quality_score",
+            "quality_tier",
+            "train_mean_rank_ic",
+            "train_rank_ic_ir",
+            "train_positive_rank_ic_ratio",
+            "train_mean_top_bottom_spread",
+        ]].copy()
+        lgbm_train_oriented, lgbm_oriented_features = _apply_feature_directions(train_feature_panel, lgbm_selected_metadata)
+        lgbm_eval_oriented, _ = _apply_feature_directions(eval_feature_panel, lgbm_selected_metadata)
+        outputs = fit_predict_models(
+            train_df=lgbm_train_oriented,
+            test_df=lgbm_eval_oriented,
+            features=lgbm_oriented_features,
+            target_col=target_col,
+            random_state=cfg.train.random_state,
             lgbm_cfg=cfg.train.lgbm,
         )
 
-        pred_df = eval_feature_panel[["date", "symbol", "tradable_universe", *selected_feature_names]].copy()
+        pred_df = eval_feature_panel[["date", "symbol", "tradable_universe", *lgbm_feature_names]].copy()
         pred_df["ridge_score"] = outputs.ridge_pred.astype("float32")
         pred_df["lgbm_score"] = outputs.lgbm_pred.astype("float32")
 
@@ -1094,17 +1153,16 @@ def run_factor_chain_pipeline(
             continue
 
         feature_importance = summarize_feature_importance(
-            selected_feature_names,
+            lgbm_feature_names,
             [outputs.ridge_coef],
             [outputs.lgbm_feature_importance],
         )
         feature_importance.to_csv(split_dir / "feature_importance_summary.csv", index=False)
-        ridge_coefficients = summarize_ridge_coefficients(selected_features, outputs.ridge_coef)
         ridge_coefficients.to_csv(split_dir / "ridge_coefficients.csv", index=False)
-        summarize_feature_diagnostics(valid_merged, selected_feature_names, target_col).to_csv(
+        summarize_feature_diagnostics(valid_merged, lgbm_feature_names, target_col).to_csv(
             split_dir / "feature_diagnostics_valid.csv", index=False
         )
-        summarize_feature_diagnostics(test_merged, selected_feature_names, target_col).to_csv(
+        summarize_feature_diagnostics(test_merged, lgbm_feature_names, target_col).to_csv(
             split_dir / "feature_diagnostics_test.csv", index=False
         )
 
@@ -1118,6 +1176,8 @@ def run_factor_chain_pipeline(
                 "test_end": (test_end_ts - pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
                 "selected_feature_count": len(selected_feature_names),
                 "selected_features": selected_feature_names,
+                "lgbm_feature_count": len(lgbm_feature_names),
+                "lgbm_selected_features": lgbm_feature_names,
             },
             "valid": {
                 "ridge": _run_strategy(valid_merged, target_col, "ridge_score", split_cfg, "valid_ridge"),
@@ -1139,6 +1199,8 @@ def run_factor_chain_pipeline(
         del eval_feature_panel
         del train_oriented
         del eval_oriented
+        del lgbm_train_oriented
+        del lgbm_eval_oriented
         del pred_df
         del merged
         del valid_merged
@@ -1176,14 +1238,21 @@ def run_factor_chain_pipeline(
         cfg.output_dir / "selected_feature_frequency.csv",
         index=False,
     )
+    summarize_lgbm_selected_feature_frequency(cfg.output_dir, split_ids).to_csv(
+        cfg.output_dir / "lgbm_selected_feature_frequency.csv",
+        index=False,
+    )
     summarize_ridge_coefficient_stability(cfg.output_dir, split_ids).to_csv(
         cfg.output_dir / "ridge_coefficient_stability.csv",
         index=False,
     )
     selected_frequency = _read_csv_or_empty(cfg.output_dir / "selected_feature_frequency.csv")
+    lgbm_selected_frequency = _read_csv_or_empty(cfg.output_dir / "lgbm_selected_feature_frequency.csv")
     ridge_stability = _read_csv_or_empty(cfg.output_dir / "ridge_coefficient_stability.csv")
     if "feature" not in selected_frequency.columns:
         selected_frequency = pd.DataFrame(columns=["feature"])
+    if "feature" not in lgbm_selected_frequency.columns:
+        lgbm_selected_frequency = pd.DataFrame(columns=["feature"])
     if "feature" not in ridge_stability.columns:
         ridge_stability = pd.DataFrame(columns=["feature"])
     whitelist_rows: list[pd.DataFrame] = []
@@ -1265,8 +1334,21 @@ def run_factor_chain_pipeline(
     ).reset_index(drop=True)
     ridge_screen.to_csv(cfg.output_dir / "ridge_screen.csv", index=False)
 
-    lgbm_feature_pool = ridge_screen.loc[ridge_screen["pass_ridge_gate"]].copy()
-    lgbm_feature_pool["final_status"] = "lgbm_candidate"
+    lgbm_feature_pool = ridge_screen.merge(
+        lgbm_selected_frequency,
+        on="feature",
+        how="left",
+        suffixes=("", "_lgbm"),
+    )
+    if "lgbm_selection_count" not in lgbm_feature_pool.columns:
+        lgbm_feature_pool["lgbm_selection_count"] = 0
+    if "lgbm_selection_rate" not in lgbm_feature_pool.columns:
+        lgbm_feature_pool["lgbm_selection_rate"] = 0.0
+    lgbm_feature_pool["lgbm_selection_count"] = lgbm_feature_pool["lgbm_selection_count"].fillna(0).astype(int)
+    lgbm_feature_pool["lgbm_selection_rate"] = lgbm_feature_pool["lgbm_selection_rate"].fillna(0.0)
+    lgbm_feature_pool["final_status"] = "screened_out"
+    lgbm_feature_pool.loc[lgbm_feature_pool["lgbm_selection_count"] > 0, "final_status"] = "used_by_lgbm"
+    lgbm_feature_pool = lgbm_feature_pool.loc[lgbm_feature_pool["lgbm_selection_count"] > 0].copy()
     lgbm_feature_pool.to_csv(cfg.output_dir / "lgbm_feature_pool.csv", index=False)
 
 

@@ -18,6 +18,24 @@ class ModelOutputs:
     lgbm_feature_importance: np.ndarray
 
 
+def fit_predict_ridge(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    features: list[str],
+    target_col: str,
+    random_state: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    x_train = train_df[features].fillna(0.0)
+    y_train = train_df[target_col]
+    x_test = test_df[features].fillna(0.0)
+
+    ridge = Ridge(alpha=1.0, random_state=random_state)
+    ridge.fit(x_train, y_train)
+    ridge_pred = ridge.predict(x_test)
+    ridge_coef = np.asarray(ridge.coef_, dtype=float)
+    return ridge_pred, ridge_coef
+
+
 def fit_predict_models(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
@@ -30,9 +48,13 @@ def fit_predict_models(
     y_train = train_df[target_col]
     x_test = test_df[features].fillna(0.0)
 
-    ridge = Ridge(alpha=1.0, random_state=random_state)
-    ridge.fit(x_train, y_train)
-    ridge_pred = ridge.predict(x_test)
+    ridge_pred, ridge_coef = fit_predict_ridge(
+        train_df=train_df,
+        test_df=test_df,
+        features=features,
+        target_col=target_col,
+        random_state=random_state,
+    )
 
     lgbm_params = {
         "objective": lgbm_cfg.objective,
@@ -66,7 +88,7 @@ def fit_predict_models(
     return ModelOutputs(
         ridge_pred=ridge_pred,
         lgbm_pred=lgbm_pred,
-        ridge_coef=np.asarray(ridge.coef_, dtype=float),
+        ridge_coef=ridge_coef,
         lgbm_feature_importance=np.asarray(lgbm.feature_importances_, dtype=float),
     )
 

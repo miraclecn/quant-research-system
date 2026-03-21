@@ -36,6 +36,7 @@ When a change materially affects workflow, data assumptions, research direction,
 
 - added LightGBM device configuration plumbing in `src/aqt/config.py`, `src/aqt/cli.py`, and `src/aqt/models.py`
 - corrected the matrix workflow so `20d_biweekly` reuses `20d` predictions but filters to actual biweekly rebalance dates instead of accidentally reusing weekly execution
+- `factor-chain-run` now applies a split-level Ridge gate before LightGBM training and writes `lgbm_selected_features.csv` for the actual post-Ridge feature subset used in each split
 
 ### Notes
 

@@ -89,6 +89,8 @@ class FactorEvalConfig:
     ridge_min_selection_rate_multi_split: float = 0.50
     ridge_min_selection_rate_single_split: float = 1.0
     ridge_max_original_coef_cv: float = 1.5
+    ridge_split_keep_quantile: float = 0.50
+    ridge_split_fallback_top_n: int = 8
     weights: FactorEvalWeights = field(default_factory=FactorEvalWeights)
 
 
