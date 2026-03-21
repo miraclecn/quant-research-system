@@ -24,3 +24,20 @@
 ## Update rule
 
 When a change materially affects workflow, data assumptions, research direction, or repository structure, add a short entry here.
+
+## 2026-03-21
+
+### Added
+
+- added `scripts/run_2025_horizon_matrix.py` to compare fixed-factor execution setups across `10d_weekly`, `20d_weekly`, and `20d_biweekly`
+- added `outputs/2025-horizon-matrix/20d_biweekly/period_split_summary.csv` and `.json` for quick split-half stability checks
+
+### Changed
+
+- added LightGBM device configuration plumbing in `src/aqt/config.py`, `src/aqt/cli.py`, and `src/aqt/models.py`
+- corrected the matrix workflow so `20d_biweekly` reuses `20d` predictions but filters to actual biweekly rebalance dates instead of accidentally reusing weekly execution
+
+### Notes
+
+- the current Python environment still cannot run LightGBM GPU training: a real fit attempt fails with `No OpenCL device found`
+- the current best observed setup in the 2025 matrix is `20d_biweekly`, but its strength is concentrated in `H2 2025`, so it should not yet be treated as a stable production default

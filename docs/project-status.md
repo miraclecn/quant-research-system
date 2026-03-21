@@ -1,6 +1,6 @@
 # Project Status
 
-Last updated: 2026-03-20
+Last updated: 2026-03-21
 
 ## Scope
 
@@ -21,6 +21,7 @@ This repository is a local A-share daily cross-sectional research system centere
 - default panel path: `data/daily_bars.parquet`
 - default output root: `outputs/`
 - unified factor research chain: `factor_registry -> factor_evaluation -> factor_whitelist -> ridge_screen -> lgbm_feature_pool`
+- current execution comparison baseline: `outputs/2025-horizon-matrix`
 
 ## Main workflows
 
@@ -34,14 +35,15 @@ This repository is a local A-share daily cross-sectional research system centere
 
 ## Data snapshot
 
-DuckDB tables observed on 2026-03-20:
+DuckDB tables observed on 2026-03-21:
 
 - `daily_kline`: 15,727,978 rows
 - `daily_basic`: 11,534,329 rows
 - `stock_basic`: 5,810 rows
 - `index_weight`: 74,002 rows
 - `index_daily`: 1,503 rows
-- `fina_indicator`: 366,505 rows
+- `fina_indicator_raw_v2`: 160,405 rows
+- `fina_indicator_clean`: 87,613 rows
 - `margin_detail`: 1,191,525 rows
 - `top_inst`: 232,189 rows
 - `stock_zt_pool`: 112 rows
@@ -52,6 +54,12 @@ DuckDB tables observed on 2026-03-20:
 - branch: `main`
 - initial import commit: `21df251`
 - collaboration baseline commit: `9da8080`
+
+## Current research direction
+
+- 2024 single-factor screening currently favors long-horizon trend and price-position signals over the first batch of fundamental factors
+- the 2025 execution matrix suggests `20d` label plus biweekly execution is the strongest current candidate for that factor pool
+- the same matrix also shows the `20d_biweekly` uplift is concentrated more in `H2 2025` than in `H1 2025`, so the setup is promising but not yet regime-stable
 
 ## Working conventions
 

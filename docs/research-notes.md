@@ -1,6 +1,6 @@
 # Research Notes
 
-Last updated: 2026-03-20
+Last updated: 2026-03-21
 
 ## Current high-level read
 
@@ -71,6 +71,40 @@ Interpretation:
 
 - factor-chain is useful as a research workflow, not yet a stable production default
 - feature screening should be judged on out-of-sample stability, not just train-period IC
+
+## 2024 factor to 2025 execution matrix
+
+From `outputs/single-factor-2024-formal/factor_whitelist.csv`:
+
+- the 2024 whitelist is dominated by long-horizon trend and price-position factors such as `trend_55_120`, `close_to_ma_120`, `channel_pos_120`, and `distance_to_low_120`
+- no first-batch fundamental factor entered the 2024 whitelist
+
+From `outputs/2025-horizon-matrix/summary.csv`:
+
+- `10d_weekly` and `20d_weekly` are both workable for `lgbm`, but neither is clearly better than the other
+- `20d_biweekly` is much stronger than both weekly variants for `lgbm`
+- the current best observed `lgbm` result in this matrix is roughly:
+  - annual return `96.9%`
+  - Sharpe `2.38`
+  - max drawdown `-11.3%`
+  - official index excess annual return `80.0%`
+
+Interpretation:
+
+- the current 2024 factor set behaves more like a slow signal set than a weekly trading signal set
+- changing label horizon from `10d` to `20d` alone is not enough
+- slowing execution to biweekly matters much more for this factor pool than just extending the label horizon
+
+From `outputs/2025-horizon-matrix/20d_biweekly/period_split_summary.csv`:
+
+- the `20d_biweekly` uplift is not evenly distributed through the year
+- `lgbm` in `H1 2025` is only mildly positive, with annualized return about `5.4%` and Sharpe about `0.12`
+- `lgbm` in `H2 2025` is much stronger, with annualized return about `243.5%` and Sharpe about `6.63`
+
+Interpretation:
+
+- `20d_biweekly` is the best current candidate, but it is not yet proven regime-stable
+- any move toward this configuration should include at least one more stability pass, such as split-half or rolling-year validation
 
 ## Current working default
 

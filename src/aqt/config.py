@@ -19,6 +19,7 @@ class LightGBMConfig:
     rank_bins: int = 20
     force_col_wise: bool = True
     verbosity: int = -1
+    device: str = "cpu"
 
 
 @dataclass(slots=True)

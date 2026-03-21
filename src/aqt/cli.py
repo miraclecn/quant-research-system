@@ -58,6 +58,7 @@ def main() -> None:
     parser.add_argument("--lgbm-reg-alpha", type=float, help="LightGBM L1 regularization")
     parser.add_argument("--lgbm-reg-lambda", type=float, help="LightGBM L2 regularization")
     parser.add_argument("--lgbm-rank-bins", type=int, help="Number of within-date relevance bins for lambdarank")
+    parser.add_argument("--lgbm-device", choices=["cpu", "gpu"], help="LightGBM device target")
     parser.add_argument("--factor-top-k", type=int, default=10, help="Number of features kept after train-period single-factor screening")
     parser.add_argument("--factor-min-rank-ic", type=float, default=0.0, help="Minimum absolute train-period mean_rank_ic for feature selection")
     parser.add_argument("--factor-max-corr", type=float, default=0.9, help="Maximum absolute train-period pairwise correlation allowed among selected features")
@@ -121,6 +122,8 @@ def main() -> None:
         cfg.train.lgbm.reg_lambda = args.lgbm_reg_lambda
     if args.lgbm_rank_bins is not None:
         cfg.train.lgbm.rank_bins = args.lgbm_rank_bins
+    if args.lgbm_device:
+        cfg.train.lgbm.device = args.lgbm_device
     if args.factor_min_abs_rank_ic_ir is not None:
         cfg.train.factor_eval.min_abs_rank_ic_ir = args.factor_min_abs_rank_ic_ir
     if args.factor_min_bucket_spearman is not None:

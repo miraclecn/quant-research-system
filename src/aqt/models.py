@@ -49,6 +49,7 @@ def fit_predict_models(
         "n_jobs": -1,
         "force_col_wise": lgbm_cfg.force_col_wise,
         "verbosity": lgbm_cfg.verbosity,
+        "device": lgbm_cfg.device,
     }
 
     if lgbm_cfg.objective == "lambdarank":
