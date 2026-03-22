@@ -87,15 +87,18 @@ def summarize_metrics(portfolio: pd.DataFrame) -> dict:
     else:
         median_gap_days = float(gaps.median())
         periods_per_year = 365.25 / median_gap_days if median_gap_days > 0 else 52.0
-    ann_ret = (1.0 + ret.mean()) ** periods_per_year - 1.0
-    ann_vol = ret.std(ddof=0) * np.sqrt(periods_per_year)
-    sharpe = ann_ret / ann_vol if ann_vol > 0 else 0.0
     equity = portfolio["equity"]
+    total_periods = max(int(len(ret)), 1)
+    ending_equity = float(equity.iloc[-1]) if not equity.empty else 1.0
+    ann_ret = ending_equity ** (periods_per_year / total_periods) - 1.0 if ending_equity > 0 else -1.0
+    ann_vol = ret.std(ddof=0) * np.sqrt(periods_per_year)
+    period_sharpe = ret.mean() / ret.std(ddof=0) if ret.std(ddof=0) > 0 else 0.0
+    sharpe = period_sharpe * np.sqrt(periods_per_year)
     drawdown = equity / equity.cummax() - 1.0
 
     return {
         "status": "ok",
-        "periods": int(len(portfolio)),
+        "periods": total_periods,
         "periods_per_year_est": float(periods_per_year),
         "annual_return_est": float(ann_ret),
         "annual_vol_est": float(ann_vol),

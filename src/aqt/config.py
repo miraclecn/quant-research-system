@@ -7,7 +7,11 @@ from pathlib import Path
 @dataclass(slots=True)
 class LightGBMConfig:
     objective: str = "lambdarank"
-    n_estimators: int = 300
+    metric: str | list[str] | None = "ndcg@20"
+    lambdarank_truncation_level: int | None = 20
+    n_estimators: int = 500
+    min_boost_round: int = 100
+    early_stopping_rounds: int = 50
     learning_rate: float = 0.05
     num_leaves: int = 31
     max_depth: int = -1
@@ -51,6 +55,9 @@ class PortfolioConfig:
 class TrainConfig:
     train_days: int = 504
     valid_days: int = 126
+    auto_valid_ratio: float = 0.2
+    factor_mining_months: int = 60
+    feature_warmup_months: int = 12
     min_train_rows: int = 20_000
     features: list[str] = field(default_factory=list)
     random_state: int = 42
@@ -84,7 +91,10 @@ class FactorEvalConfig:
     min_latest_top_bucket_excess: float = 0.0
     core_quantile: float = 0.80
     candidate_quantile: float = 0.50
-    fallback_top_n: int = 20
+    fallback_top_n: int = 50
+    whitelist_min_count: int = 30
+    whitelist_max_count: int = 50
+    report_top_k: int = 20
     feature_batch_size: int = 16
     ridge_min_selection_rate_multi_split: float = 0.50
     ridge_min_selection_rate_single_split: float = 1.0

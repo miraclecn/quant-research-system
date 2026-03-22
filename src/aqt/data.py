@@ -142,7 +142,12 @@ def _load_duckdb_panel(path: Path, index_code: str, start_date: str | None, end_
             ).fetchone()[0]
         )
         weight_cte = ""
-        weight_select = "0.0 AS index_weight,\n        FALSE AS in_index_weight,\n        FALSE AS has_index_weight_table,"
+        weight_select = (
+            "0.0 AS index_weight,\n"
+            "        FALSE AS in_index_weight,\n"
+            "        FALSE AS has_index_weight_table,\n"
+            "        FALSE AS has_index_snapshot,"
+        )
         weight_join = ""
         if has_index_weight:
             weight_cte = f"""
@@ -159,7 +164,12 @@ weight_dates AS (
     FROM weights
 ),
 """
-            weight_select = "w.weight AS index_weight,\n        (w.symbol IS NOT NULL) AS in_index_weight,\n        TRUE AS has_index_weight_table,"
+            weight_select = (
+                "w.weight AS index_weight,\n"
+                "        (w.symbol IS NOT NULL) AS in_index_weight,\n"
+                "        TRUE AS has_index_weight_table,\n"
+                "        (snap.weight_date IS NOT NULL) AS has_index_snapshot,"
+            )
             weight_join = """
     LEFT JOIN LATERAL (
         SELECT
@@ -254,6 +264,7 @@ panel AS (
         b.index_weight,
         b.in_index_weight,
         b.has_index_weight_table,
+        b.has_index_snapshot,
         {panel_select},
         b.listed_days,
         b.float_mv_rank
@@ -286,7 +297,7 @@ SELECT
         ELSE (close / NULLIF(open, 0.0) - 1.0) <= -0.098
     END AS is_limit_down,
     CASE
-        WHEN has_index_weight_table THEN in_index_weight
+        WHEN has_index_weight_table AND has_index_snapshot THEN in_index_weight
         ELSE float_mv_rank BETWEEN 801 AND 1800
     END AS in_universe
 FROM panel
@@ -326,13 +337,22 @@ def load_panel(
     index_code: str = "000852.SH",
     start_date: str | None = None,
     end_date: str | None = None,
+    columns: list[str] | None = None,
 ) -> pd.DataFrame:
     path = resolve_input_path(path)
 
     if path.suffix == ".parquet":
-        df = pd.read_parquet(path)
+        filters = []
+        if start_date:
+            filters.append(("date", ">=", pd.Timestamp(start_date)))
+        if end_date:
+            filters.append(("date", "<=", pd.Timestamp(end_date)))
+        parquet_kwargs = {"columns": columns}
+        if filters:
+            parquet_kwargs["filters"] = filters
+        df = pd.read_parquet(path, **parquet_kwargs)
     elif path.suffix == ".csv":
-        df = pd.read_csv(path)
+        df = pd.read_csv(path, usecols=columns)
     elif path.suffix == ".duckdb":
         return _load_duckdb_panel(path, index_code=index_code, start_date=start_date, end_date=end_date)
     else:
@@ -352,4 +372,68 @@ def export_panel(
     panel = load_panel(input_path, index_code=index_code, start_date=start_date, end_date=end_date)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     panel.to_parquet(output_path, index=False)
+    return output_path
+
+
+def default_benchmark_output_path(index_code: str = "000852.SH") -> Path:
+    safe_code = index_code.lower().replace(".", "_")
+    return Path("data") / f"{safe_code}_benchmark.parquet"
+
+
+def export_index_benchmark(
+    input_path: Path,
+    output_path: Path,
+    index_code: str = "000852.SH",
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> Path:
+    path = resolve_input_path(input_path)
+    db_path = path if path.suffix == ".duckdb" else DEFAULT_DUCKDB_PATH
+    if not db_path.exists():
+        raise FileNotFoundError(f"Benchmark export requires DuckDB input; not found: {db_path}")
+
+    filters = []
+    params: list[str] = [index_code]
+    if start_date:
+        filters.append("strptime(trade_date, '%Y%m%d') >= CAST(? AS DATE)")
+        params.append(start_date)
+    if end_date:
+        filters.append("strptime(trade_date, '%Y%m%d') <= CAST(? AS DATE)")
+        params.append(end_date)
+    where_clause = " AND " + " AND ".join(filters) if filters else ""
+
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        exists = bool(
+            con.execute(
+                "SELECT COUNT(*) > 0 FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = 'index_daily'"
+            ).fetchone()[0]
+        )
+        if not exists:
+            raise ValueError("DuckDB file does not contain index_daily table.")
+        benchmark = con.execute(
+            f"""
+SELECT
+    strptime(trade_date, '%Y%m%d') AS date,
+    close,
+    pre_close
+FROM index_daily
+WHERE ts_code = ?{where_clause}
+ORDER BY trade_date
+""",
+            params,
+        ).df()
+
+    if benchmark.empty:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(columns=["date", "benchmark_ret", "benchmark_equity"]).to_parquet(output_path, index=False)
+        return output_path
+
+    benchmark["date"] = pd.to_datetime(benchmark["date"])
+    benchmark["benchmark_ret"] = benchmark["close"] / benchmark["pre_close"].replace(0, pd.NA) - 1.0
+    benchmark = benchmark[["date", "benchmark_ret"]].copy()
+    benchmark["benchmark_ret"] = pd.to_numeric(benchmark["benchmark_ret"], errors="coerce").fillna(0.0).astype("float32")
+    benchmark["benchmark_equity"] = (1.0 + benchmark["benchmark_ret"]).cumprod().astype("float32")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    benchmark.to_parquet(output_path, index=False)
     return output_path

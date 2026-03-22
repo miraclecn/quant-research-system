@@ -71,8 +71,10 @@ aqt run --input stock_data.duckdb --start-date 2020-01-01 --end-date 2025-12-31
 Optional research comparison:
 
 ```bash
-aqt research-run --input data/daily_bars.parquet --research-start 2020-01-01 --research-end 2026-03-19 --train-months 36 --valid-months 12 --test-months 12 --step-months 12 --neutralize-scores
+aqt research-run --input data/daily_bars.parquet --research-start 2025-01-01 --research-end 2025-12-31 --train-months 36 --test-months 3 --step-months 3 --neutralize-scores
 ```
+
+`research-run` now interprets `research-start` / `research-end` as the out-of-sample backtest span. Each split uses a fixed `5 year factor-mining window + 3 year training window`, automatically time-splits the 3-year training window into the first 80% for model fitting and the last 20% for validation / LightGBM early stopping, then predicts the next 3 months.
 
 This keeps the default raw-score workflow unchanged and adds an extra `lgbm_neutralized` result using cross-sectional industry and size neutralization.
 
@@ -80,14 +82,15 @@ Unified factor research workflow:
 
 ```bash
 aqt single-factor-run --input data/daily_bars.parquet --output-dir outputs/factor-eval --research-start 2020-01-01 --research-end 2025-12-31 --single-factor-top-k 20
-aqt factor-chain-run --input data/daily_bars.parquet --output-dir outputs/factor-chain --research-start 2020-01-01 --research-end 2025-12-31 --train-months 36 --valid-months 12 --test-months 12 --step-months 12 --factor-top-k 20
+aqt factor-chain-run --input data/daily_bars.parquet --output-dir outputs/factor-chain --research-start 2025-01-01 --research-end 2025-12-31 --train-months 36 --test-months 3 --step-months 3 --factor-top-k 50 --factor-report-top-k 20
 ```
 
 This workflow is now organized as:
 
 - `factor_registry.csv`: candidate factor catalog with family, expression, and params
 - `factor_evaluation.csv`: unified single-factor evaluation table
-- `factor_whitelist.csv`: factors passing the single-factor gate
+- `factor_whitelist.csv`: broadened whitelist for Ridge, keeping strict-pass factors plus high-quality candidates and backfilling to a 30-50 factor pool
+- factor-chain detailed per-factor reports now default to the top 20 factors, while the broader 30-50 whitelist still feeds Ridge
 - `ridge_screen.csv`: whitelist factors re-screened by rolling Ridge stability
 - split-level `lgbm_selected_features.csv`: Ridge-filtered feature subset actually handed to LightGBM in each split
 - `lgbm_feature_pool.csv`: cross-split summary of factors actually used by LightGBM research
@@ -111,9 +114,13 @@ Recommended workflow when keeping DuckDB as the raw store:
 export TUSHARE_TOKEN=...
 aqt update-raw --input stock_data.duckdb --lookback-days 7
 aqt update-index-weight --input stock_data.duckdb --index-code 000852.SH --start-date 2020-01-01 --end-date 2026-03-19
+aqt update-index-daily --input stock_data.duckdb --index-code 000852.SH --start-date 2020-01-01 --end-date 2026-03-19
 aqt export-panel --input stock_data.duckdb --output data/daily_bars.parquet --start-date 2020-01-01 --end-date 2025-12-31
+aqt export-index-benchmark --input stock_data.duckdb --output data/000852_sh_benchmark.parquet --start-date 2020-01-01 --end-date 2025-12-31
 aqt run --input data/daily_bars.parquet
 ```
+
+Official index benchmark loading now prefers the small exported benchmark parquet such as `data/000852_sh_benchmark.parquet`, and only falls back to DuckDB `index_daily` when that file is missing.
 
 One-shot daily workflow:
 

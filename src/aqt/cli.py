@@ -4,8 +4,16 @@ import argparse
 from pathlib import Path
 
 from aqt.config import AppConfig
-from aqt.data import export_panel
-from aqt.pipeline import ensure_default_dirs, run_factor_chain_pipeline, run_family_lab_pipeline, run_pipeline, run_research_pipeline, run_single_factor_pipeline
+from aqt.data import default_benchmark_output_path, export_index_benchmark, export_panel
+from aqt.pipeline import (
+    ensure_default_dirs,
+    run_factor_chain_pipeline,
+    run_family_lab_pipeline,
+    run_lgbm_tuning_pipeline,
+    run_pipeline,
+    run_research_pipeline,
+    run_single_factor_pipeline,
+)
 from aqt.update import (
     build_prune_plan,
     execute_prune_plan,
@@ -25,7 +33,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="A-share daily research starter")
     parser.add_argument(
         "command",
-        choices=["run", "research-run", "factor-chain-run", "single-factor-run", "family-lab", "export-panel", "update-raw", "update-index-weight", "update-index-daily", "rebuild-fina-indicator", "prune-db", "daily-research"],
+        choices=["run", "research-run", "factor-chain-run", "tune-lgbm", "single-factor-run", "family-lab", "export-panel", "export-index-benchmark", "update-raw", "update-index-weight", "update-index-daily", "rebuild-fina-indicator", "prune-db", "daily-research"],
         help="Workflow command",
     )
     parser.add_argument("--input", dest="input_path", help="Input panel path")
@@ -42,13 +50,14 @@ def main() -> None:
     parser.add_argument("--research-start", dest="research_start", help="Rolling research window start date for research-run")
     parser.add_argument("--research-end", dest="research_end", help="Rolling research window end date for research-run")
     parser.add_argument("--train-months", dest="train_months", type=int, help="Training window size in months for research-run")
-    parser.add_argument("--valid-months", dest="valid_months", type=int, help="Validation window size in months for research-run")
+    parser.add_argument("--valid-months", dest="valid_months", type=int, help="Deprecated legacy validation window size in months; ignored by research-run and factor-chain-run")
     parser.add_argument("--test-months", dest="test_months", type=int, help="Test window size in months for research-run")
-    parser.add_argument("--step-months", dest="step_months", type=int, help="Rolling step size in months for research-run; defaults to valid-months")
+    parser.add_argument("--step-months", dest="step_months", type=int, help="Rolling step size in months for research-run; defaults to test-months")
     parser.add_argument("--top-n", type=int, help="Number of names to hold at each rebalance")
     parser.add_argument("--rebalance-weekday", type=int, choices=range(5), help="0=Mon, 4=Fri")
     parser.add_argument("--lgbm-objective", choices=["lambdarank", "regression"], help="LightGBM objective; default is lambdarank")
     parser.add_argument("--lgbm-n-estimators", type=int, help="LightGBM number of boosting rounds")
+    parser.add_argument("--lgbm-min-boost-round", type=int, help="Minimum boosting rounds before early stopping can terminate training")
     parser.add_argument("--lgbm-learning-rate", type=float, help="LightGBM learning rate")
     parser.add_argument("--lgbm-num-leaves", type=int, help="LightGBM num_leaves")
     parser.add_argument("--lgbm-max-depth", type=int, help="LightGBM max_depth; use -1 for no limit")
@@ -58,8 +67,8 @@ def main() -> None:
     parser.add_argument("--lgbm-reg-alpha", type=float, help="LightGBM L1 regularization")
     parser.add_argument("--lgbm-reg-lambda", type=float, help="LightGBM L2 regularization")
     parser.add_argument("--lgbm-rank-bins", type=int, help="Number of within-date relevance bins for lambdarank")
-    parser.add_argument("--lgbm-device", choices=["cpu", "gpu"], help="LightGBM device target")
-    parser.add_argument("--factor-top-k", type=int, default=10, help="Number of features kept after train-period single-factor screening")
+    parser.add_argument("--lgbm-device", choices=["cpu", "gpu", "cuda"], help="LightGBM device target")
+    parser.add_argument("--factor-top-k", type=int, default=50, help="Number of features kept after train-period single-factor screening")
     parser.add_argument("--factor-min-rank-ic", type=float, default=0.0, help="Minimum absolute train-period mean_rank_ic for feature selection")
     parser.add_argument("--factor-max-corr", type=float, default=0.9, help="Maximum absolute train-period pairwise correlation allowed among selected features")
     parser.add_argument("--factor-min-abs-rank-ic-ir", type=float, help="Minimum absolute mean rank ICIR for passing the single-factor gate")
@@ -69,7 +78,9 @@ def main() -> None:
     parser.add_argument("--factor-core-quantile", type=float, help="Quantile threshold for tagging factors as core")
     parser.add_argument("--factor-candidate-quantile", type=float, help="Quantile threshold for tagging factors as candidate")
     parser.add_argument("--factor-fallback-top-n", type=int, help="Fallback number of top quality-score factors used when whitelist is empty")
+    parser.add_argument("--factor-report-top-k", type=int, help="Number of top-ranked factors to export detailed single-factor reports for factor-chain-run")
     parser.add_argument("--factor-batch-size", type=int, help="Number of factors evaluated per batch for single-factor research")
+    parser.add_argument("--tune-trials", type=int, help="Number of random-search trials for tune-lgbm")
     parser.add_argument("--ridge-min-selection-rate-multi-split", type=float, help="Minimum Ridge selection rate when there are multiple rolling splits")
     parser.add_argument("--ridge-min-selection-rate-single-split", type=float, help="Minimum Ridge selection rate when there is only one split")
     parser.add_argument("--ridge-max-original-coef-cv", type=float, help="Maximum Ridge original coefficient CV for passing the Ridge gate")
@@ -104,6 +115,8 @@ def main() -> None:
         cfg.train.lgbm.objective = args.lgbm_objective
     if args.lgbm_n_estimators is not None:
         cfg.train.lgbm.n_estimators = args.lgbm_n_estimators
+    if args.lgbm_min_boost_round is not None:
+        cfg.train.lgbm.min_boost_round = args.lgbm_min_boost_round
     if args.lgbm_learning_rate is not None:
         cfg.train.lgbm.learning_rate = args.lgbm_learning_rate
     if args.lgbm_num_leaves is not None:
@@ -138,6 +151,8 @@ def main() -> None:
         cfg.train.factor_eval.candidate_quantile = args.factor_candidate_quantile
     if args.factor_fallback_top_n is not None:
         cfg.train.factor_eval.fallback_top_n = args.factor_fallback_top_n
+    if args.factor_report_top_k is not None:
+        cfg.train.factor_eval.report_top_k = args.factor_report_top_k
     if args.factor_batch_size is not None:
         cfg.train.factor_eval.feature_batch_size = args.factor_batch_size
     if args.ridge_min_selection_rate_multi_split is not None:
@@ -160,7 +175,6 @@ def main() -> None:
             ("research_start", args.research_start),
             ("research_end", args.research_end),
             ("train_months", args.train_months),
-            ("valid_months", args.valid_months),
             ("test_months", args.test_months),
         ] if not value]
         if missing:
@@ -170,16 +184,15 @@ def main() -> None:
             research_start=args.research_start,
             research_end=args.research_end,
             train_months=args.train_months,
-            valid_months=args.valid_months,
             test_months=args.test_months,
             step_months=args.step_months,
+            valid_months=args.valid_months,
         )
     elif args.command == "factor-chain-run":
         missing = [name for name, value in [
             ("research_start", args.research_start),
             ("research_end", args.research_end),
             ("train_months", args.train_months),
-            ("valid_months", args.valid_months),
             ("test_months", args.test_months),
         ] if not value]
         if missing:
@@ -189,12 +202,30 @@ def main() -> None:
             research_start=args.research_start,
             research_end=args.research_end,
             train_months=args.train_months,
-            valid_months=args.valid_months,
             test_months=args.test_months,
             step_months=args.step_months,
             factor_top_k=args.factor_top_k,
             factor_min_rank_ic=args.factor_min_rank_ic,
             factor_max_corr=args.factor_max_corr,
+            valid_months=args.valid_months,
+        )
+    elif args.command == "tune-lgbm":
+        missing = [name for name, value in [
+            ("research_start", args.research_start),
+            ("train_months", args.train_months),
+            ("test_months", args.test_months),
+        ] if not value]
+        if missing:
+            raise ValueError(f"tune-lgbm requires: {', '.join(missing)}")
+        run_lgbm_tuning_pipeline(
+            cfg,
+            research_start=args.research_start,
+            train_months=args.train_months,
+            test_months=args.test_months,
+            factor_top_k=args.factor_top_k,
+            factor_min_rank_ic=args.factor_min_rank_ic,
+            factor_max_corr=args.factor_max_corr,
+            trials=args.tune_trials or 20,
         )
     elif args.command == "single-factor-run":
         missing = [name for name, value in [
@@ -229,6 +260,17 @@ def main() -> None:
         output_path = Path(args.output_path) if args.output_path else Path("data/daily_bars.parquet")
         input_path = cfg.data.input_path
         export_panel(
+            input_path=input_path,
+            index_code=cfg.data.index_code,
+            output_path=output_path,
+            start_date=cfg.data.start_date,
+            end_date=cfg.data.end_date,
+        )
+        print(output_path)
+    elif args.command == "export-index-benchmark":
+        output_path = Path(args.output_path) if args.output_path else default_benchmark_output_path(cfg.data.index_code)
+        input_path = cfg.data.input_path
+        export_index_benchmark(
             input_path=input_path,
             index_code=cfg.data.index_code,
             output_path=output_path,
@@ -307,6 +349,15 @@ def main() -> None:
             end_date=cfg.data.end_date,
         )
         print(panel_path)
+        benchmark_path = default_benchmark_output_path(cfg.data.index_code)
+        export_index_benchmark(
+            input_path=db_path,
+            index_code=cfg.data.index_code,
+            output_path=benchmark_path,
+            start_date=cfg.data.start_date,
+            end_date=cfg.data.end_date,
+        )
+        print(benchmark_path)
         cfg.data.input_path = panel_path
         run_pipeline(cfg)
     elif args.command == "update-index-daily":

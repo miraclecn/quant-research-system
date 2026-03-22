@@ -9,6 +9,7 @@ import pandas as pd
 
 from aqt.backtest import run_backtest, select_rebalance_dates, summarize_metrics
 from aqt.config import AppConfig, PortfolioConfig
+from aqt.data import default_benchmark_output_path
 
 
 def summarize_feature_importance(
@@ -186,48 +187,8 @@ def compute_signal_diagnostics(
     target_col: str,
     bucket_count: int = 5,
 ) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
-    rows: list[dict] = []
-    bucket_rows: list[pd.DataFrame] = []
-
-    base = scored.loc[scored["tradable_universe"]].copy()
-    base = base[[ "date", "symbol", score_col, target_col]].dropna(subset=[score_col, target_col])
-
-    for date, day_df in base.groupby("date", sort=True):
-        if len(day_df) < bucket_count:
-            continue
-
-        pearson_ic = day_df[score_col].corr(day_df[target_col], method="pearson")
-        rank_ic = day_df[score_col].corr(day_df[target_col], method="spearman")
-
-        ranked = day_df.copy()
-        ranked["bucket"] = pd.qcut(
-            ranked[score_col].rank(method="first"),
-            q=bucket_count,
-            labels=[f"Q{i}" for i in range(1, bucket_count + 1)],
-        )
-        bucket_mean = (
-            ranked.groupby("bucket", observed=False)[target_col]
-            .mean()
-            .rename("avg_future_return")
-            .reset_index()
-        )
-        bucket_mean["date"] = date
-        bucket_rows.append(bucket_mean)
-
-        top_bucket = bucket_mean.loc[bucket_mean["bucket"] == f"Q{bucket_count}", "avg_future_return"].mean()
-        bottom_bucket = bucket_mean.loc[bucket_mean["bucket"] == "Q1", "avg_future_return"].mean()
-        rows.append(
-            {
-                "date": date,
-                "n": int(len(day_df)),
-                "pearson_ic": float(pearson_ic) if pd.notna(pearson_ic) else np.nan,
-                "rank_ic": float(rank_ic) if pd.notna(rank_ic) else np.nan,
-                "top_bottom_spread": float(top_bucket - bottom_bucket) if pd.notna(top_bucket) and pd.notna(bottom_bucket) else np.nan,
-            }
-        )
-
-    ic_df = pd.DataFrame(rows)
-    bucket_df = pd.concat(bucket_rows, ignore_index=True) if bucket_rows else pd.DataFrame(columns=["bucket", "avg_future_return", "date"])
+    ic_df, bucket_df, _, labels = _compute_daily_bucket_stats(scored, score_col, target_col, bucket_count)
+    bucket_df = bucket_df.rename(columns={"avg_target": "avg_future_return"}) if not bucket_df.empty else pd.DataFrame(columns=["bucket", "avg_future_return", "date"])
 
     summary = {
         "coverage_dates": int(len(ic_df)),
@@ -255,24 +216,29 @@ def winsorize_and_zscore_by_date(
         return out
 
     work = out.loc[eligible, ["date", value_col]].copy()
-    processed: list[pd.DataFrame] = []
-    for _, day in work.groupby("date", sort=True, observed=False):
-        values = day[value_col].astype(float)
-        lo = values.quantile(lower_quantile)
-        hi = values.quantile(upper_quantile)
-        clipped = values.clip(lower=lo, upper=hi)
-        std = clipped.std(ddof=0)
-        if pd.isna(std) or std <= 0:
-            standardized = pd.Series(np.zeros(len(clipped), dtype=float), index=day.index)
-        else:
-            standardized = (clipped - clipped.mean()) / std
-            standardized.index = day.index
-        day = day.copy()
-        day[output_col] = standardized
-        processed.append(day[[output_col]])
+    work[value_col] = work[value_col].astype(float)
 
-    processed_df = pd.concat(processed).sort_index() if processed else pd.DataFrame(columns=[output_col])
-    out.loc[processed_df.index, output_col] = processed_df[output_col].astype("float32")
+    quantiles = (
+        work.groupby("date", sort=False, observed=False)[value_col]
+        .quantile([lower_quantile, upper_quantile])
+        .unstack(level=-1)
+        .rename(columns={lower_quantile: "_lo", upper_quantile: "_hi"})
+    )
+    work = work.join(quantiles, on="date")
+    work["_clipped"] = work[value_col].clip(lower=work["_lo"], upper=work["_hi"])
+
+    clipped_stats = (
+        work.groupby("date", sort=False, observed=False)["_clipped"]
+        .agg(_mean="mean", _std=lambda s: s.std(ddof=0))
+    )
+    work = work.join(clipped_stats, on="date")
+
+    standardized = np.where(
+        work["_std"].fillna(0.0).to_numpy() > 0,
+        (work["_clipped"].to_numpy() - work["_mean"].to_numpy()) / work["_std"].to_numpy(),
+        0.0,
+    )
+    out.loc[work.index, output_col] = standardized.astype("float32")
     return out
 
 
@@ -282,37 +248,10 @@ def compute_single_factor_group_backtest(
     target_col: str,
     bucket_count: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    rows: list[dict] = []
     curve_rows: list[dict] = []
-
-    base = scored.loc[scored["tradable_universe"]].copy()
-    base = base[["date", "symbol", score_col, target_col]].dropna(subset=[score_col, target_col])
-
-    labels = [f"Q{i}" for i in range(1, bucket_count + 1)]
+    _, _, returns_df, labels = _compute_daily_bucket_stats(scored, score_col, target_col, bucket_count)
     top_label = labels[-1]
     bottom_label = labels[0]
-
-    for date, day_df in base.groupby("date", sort=True):
-        if len(day_df) < bucket_count:
-            continue
-        ranked = day_df.copy()
-        ranked["bucket"] = pd.qcut(
-            ranked[score_col].rank(method="first"),
-            q=bucket_count,
-            labels=labels,
-        )
-        grouped = (
-            ranked.groupby("bucket", observed=False)[target_col]
-            .mean()
-            .reindex(labels)
-        )
-        row = {"date": date}
-        for label in labels:
-            row[label] = float(grouped.loc[label]) if pd.notna(grouped.loc[label]) else np.nan
-        row["long_short"] = row[top_label] - row[bottom_label] if pd.notna(row[top_label]) and pd.notna(row[bottom_label]) else np.nan
-        rows.append(row)
-
-    returns_df = pd.DataFrame(rows)
     if returns_df.empty:
         return returns_df, pd.DataFrame(), {"status": "empty"}
 
@@ -358,31 +297,165 @@ def compute_single_factor_group_backtest(
     return returns_df, pd.DataFrame(curve_rows), summary
 
 
+def _compute_daily_bucket_stats(
+    scored: pd.DataFrame,
+    score_col: str,
+    target_col: str,
+    bucket_count: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
+    ic_rows: list[dict] = []
+    bucket_rows: list[pd.DataFrame] = []
+    return_rows: list[dict] = []
+
+    base = scored.loc[scored["tradable_universe"]].copy()
+    base = base[["date", "symbol", score_col, target_col]].dropna(subset=[score_col, target_col])
+    labels = [f"Q{i}" for i in range(1, bucket_count + 1)]
+    top_label = labels[-1]
+    bottom_label = labels[0]
+
+    for date, day_df in base.groupby("date", sort=True):
+        if len(day_df) < bucket_count:
+            continue
+
+        pearson_ic = day_df[score_col].corr(day_df[target_col], method="pearson")
+        rank_ic = day_df[score_col].corr(day_df[target_col], method="spearman")
+
+        ranked = day_df.copy()
+        ranked["bucket"] = pd.qcut(
+            ranked[score_col].rank(method="first"),
+            q=bucket_count,
+            labels=labels,
+        )
+        grouped = ranked.groupby("bucket", observed=False)[target_col].mean().reindex(labels)
+        bucket_mean = grouped.rename("avg_target").reset_index()
+        bucket_mean["date"] = date
+        bucket_rows.append(bucket_mean)
+
+        top_bucket = grouped.loc[top_label]
+        bottom_bucket = grouped.loc[bottom_label]
+        ic_rows.append(
+            {
+                "date": date,
+                "n": int(len(day_df)),
+                "pearson_ic": float(pearson_ic) if pd.notna(pearson_ic) else np.nan,
+                "rank_ic": float(rank_ic) if pd.notna(rank_ic) else np.nan,
+                "top_bottom_spread": float(top_bucket - bottom_bucket) if pd.notna(top_bucket) and pd.notna(bottom_bucket) else np.nan,
+            }
+        )
+
+        row = {"date": date}
+        for label in labels:
+            value = grouped.loc[label]
+            row[label] = float(value) if pd.notna(value) else np.nan
+        row["long_short"] = row[top_label] - row[bottom_label] if pd.notna(row[top_label]) and pd.notna(row[bottom_label]) else np.nan
+        return_rows.append(row)
+
+    ic_df = pd.DataFrame(ic_rows)
+    bucket_df = pd.concat(bucket_rows, ignore_index=True) if bucket_rows else pd.DataFrame(columns=["bucket", "avg_target", "date"])
+    returns_df = pd.DataFrame(return_rows)
+    return ic_df, bucket_df, returns_df, labels
+
+
 def summarize_feature_diagnostics(
     scored: pd.DataFrame,
     feature_names: list[str],
     target_col: str,
 ) -> pd.DataFrame:
-    rows: list[dict] = []
     keep_cols = ["date", "symbol", "tradable_universe", target_col, *feature_names]
     base = scored.loc[:, [col for col in keep_cols if col in scored.columns]].copy()
+    feature_names = [feature for feature in feature_names if feature in base.columns]
+    if not feature_names:
+        return pd.DataFrame()
 
-    for feature in feature_names:
-        _, diagnostics, _ = compute_signal_diagnostics(base, score_col=feature, target_col=target_col)
-        rows.append(
+    daily_rows: list[pd.DataFrame] = []
+    for date, day_df in (
+        base.loc[base["tradable_universe"], ["date", target_col, *feature_names]]
+        .dropna(subset=[target_col])
+        .groupby("date", sort=True)
+    ):
+        feature_frame = day_df[feature_names].dropna(axis=1, how="all")
+        if len(day_df) < 2 or feature_frame.empty:
+            continue
+
+        target = day_df[target_col].astype(float)
+        pearson_ic = feature_frame.corrwith(target, method="pearson")
+        rank_ic = feature_frame.rank(method="average").corrwith(target.rank(method="average"), method="pearson")
+
+        spread_series = pd.Series(np.nan, index=feature_frame.columns, dtype=float)
+        if len(day_df) >= 5:
+            valid_counts = feature_frame.notna().sum()
+            spread_features = valid_counts[valid_counts >= 5].index.tolist()
+            if spread_features:
+                spread_frame = feature_frame.loc[:, spread_features]
+                ranks = spread_frame.rank(method="first")
+                rank_values = ranks.to_numpy(dtype=float)
+                value_mask = spread_frame.notna().to_numpy()
+                count_values = valid_counts.loc[spread_features].to_numpy(dtype=float)
+
+                bucket_ids = np.full(rank_values.shape, np.nan, dtype=float)
+                for sample_count in np.unique(count_values.astype(int)):
+                    col_mask = count_values.astype(int) == sample_count
+                    if sample_count < 5:
+                        continue
+                    rank_to_bucket = (
+                        pd.qcut(pd.Series(np.arange(1, sample_count + 1)), q=5, labels=False).to_numpy(dtype=float) + 1.0
+                    )
+                    col_ranks = rank_values[:, col_mask]
+                    col_valid_mask = value_mask[:, col_mask]
+                    col_bucket_ids = np.full(col_ranks.shape, np.nan, dtype=float)
+                    integer_ranks = col_ranks[col_valid_mask].astype(int) - 1
+                    col_bucket_ids[col_valid_mask] = rank_to_bucket[integer_ranks]
+                    bucket_ids[:, col_mask] = col_bucket_ids
+
+                target_values = target.to_numpy(dtype=float)[:, None]
+                top_mask = bucket_ids == 5.0
+                bottom_mask = bucket_ids == 1.0
+                top_counts = top_mask.sum(axis=0)
+                bottom_counts = bottom_mask.sum(axis=0)
+                top_means = np.divide(
+                    (top_mask * target_values).sum(axis=0),
+                    top_counts,
+                    out=np.full(len(spread_features), np.nan, dtype=float),
+                    where=top_counts > 0,
+                )
+                bottom_means = np.divide(
+                    (bottom_mask * target_values).sum(axis=0),
+                    bottom_counts,
+                    out=np.full(len(spread_features), np.nan, dtype=float),
+                    where=bottom_counts > 0,
+                )
+                spread_series.loc[spread_features] = top_means - bottom_means
+
+        day_stats = pd.DataFrame(
             {
-                "feature": feature,
-                "coverage_dates": diagnostics.get("coverage_dates"),
-                "mean_pearson_ic": diagnostics.get("mean_pearson_ic"),
-                "mean_rank_ic": diagnostics.get("mean_rank_ic"),
-                "ic_ir": diagnostics.get("ic_ir"),
-                "rank_ic_ir": diagnostics.get("rank_ic_ir"),
-                "positive_rank_ic_ratio": diagnostics.get("positive_rank_ic_ratio"),
-                "mean_top_bottom_spread": diagnostics.get("mean_top_bottom_spread"),
+                "feature": feature_frame.columns,
+                "date": date,
+                "pearson_ic": pearson_ic.reindex(feature_frame.columns).to_numpy(),
+                "rank_ic": rank_ic.reindex(feature_frame.columns).to_numpy(),
+                "top_bottom_spread": spread_series.reindex(feature_frame.columns).to_numpy(),
             }
         )
+        daily_rows.append(day_stats)
 
-    out = pd.DataFrame(rows)
+    if not daily_rows:
+        return pd.DataFrame()
+
+    daily_df = pd.concat(daily_rows, ignore_index=True)
+    grouped = daily_df.groupby("feature", observed=False)
+    out = grouped.agg(
+        coverage_dates=("date", "nunique"),
+        mean_pearson_ic=("pearson_ic", "mean"),
+        mean_rank_ic=("rank_ic", "mean"),
+        pearson_ic_std=("pearson_ic", lambda s: s.std(ddof=0)),
+        rank_ic_std=("rank_ic", lambda s: s.std(ddof=0)),
+        positive_rank_ic_ratio=("rank_ic", lambda s: float((s > 0).mean())),
+        mean_top_bottom_spread=("top_bottom_spread", "mean"),
+    ).reset_index()
+    out["ic_ir"] = out["mean_pearson_ic"] / out["pearson_ic_std"].replace(0, np.nan)
+    out["rank_ic_ir"] = out["mean_rank_ic"] / out["rank_ic_std"].replace(0, np.nan)
+    out["ic_ir"] = out["ic_ir"].fillna(0.0)
+    out["rank_ic_ir"] = out["rank_ic_ir"].fillna(0.0)
+    out = out.drop(columns=["pearson_ic_std", "rank_ic_std"])
     if out.empty:
         return out
     return out.sort_values(
@@ -422,6 +495,15 @@ def load_official_index_benchmark(
     cfg: AppConfig,
     benchmark_dates: pd.Series,
 ) -> pd.DataFrame:
+    benchmark_dates = pd.to_datetime(benchmark_dates)
+    benchmark_path = default_benchmark_output_path(cfg.data.index_code)
+    if benchmark_path.exists():
+        benchmark = pd.read_parquet(benchmark_path, columns=["date", "benchmark_ret"])
+        benchmark["date"] = pd.to_datetime(benchmark["date"])
+        benchmark = benchmark.loc[benchmark["date"].isin(benchmark_dates), ["date", "benchmark_ret"]].copy()
+        benchmark["benchmark_equity"] = (1.0 + benchmark["benchmark_ret"].fillna(0.0)).cumprod()
+        return benchmark.reset_index(drop=True)
+
     input_path = cfg.data.input_path if cfg.data.input_path.suffix == ".duckdb" else Path("stock_data.duckdb")
     if not input_path.exists():
         return pd.DataFrame(columns=["date", "benchmark_ret", "benchmark_equity"])
@@ -452,7 +534,7 @@ ORDER BY trade_date
         return pd.DataFrame(columns=["date", "benchmark_ret", "benchmark_equity"])
 
     df["benchmark_ret"] = df["close"] / df["pre_close"].replace(0, np.nan) - 1.0
-    benchmark = df.loc[df["date"].isin(pd.to_datetime(benchmark_dates)), ["date", "benchmark_ret"]].copy()
+    benchmark = df.loc[df["date"].isin(benchmark_dates), ["date", "benchmark_ret"]].copy()
     benchmark["benchmark_equity"] = (1.0 + benchmark["benchmark_ret"].fillna(0.0)).cumprod()
     return benchmark.reset_index(drop=True)
 

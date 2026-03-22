@@ -6,6 +6,11 @@ import re
 import numpy as np
 import pandas as pd
 
+try:
+    import ta_cn.talib as ta_talib
+except Exception:  # pragma: no cover - optional acceleration dependency
+    ta_talib = None
+
 EXTENDED_CLOSE_TO_MA_WINDOWS = [10, 89, 120]
 EXTENDED_TREND_PAIRS = [(10, 20), (5, 34), (13, 55), (20, 120), (34, 89), (55, 120)]
 MA_SPREAD_TRIPLES = [(5, 20, 60), (5, 34, 89), (8, 21, 55), (10, 20, 60), (13, 34, 89), (20, 60, 120)]
@@ -394,6 +399,13 @@ def _infer_factor_dependencies(feature: str) -> list[str]:
     return ["close"]
 
 
+def infer_feature_dependencies(features: list[str] | None = None) -> list[str]:
+    deps: set[str] = set()
+    for feature in features or FEATURE_COLUMNS:
+        deps.update(_infer_factor_dependencies(feature))
+    return sorted(deps)
+
+
 def build_factor_registry(features: list[str] | None = None) -> pd.DataFrame:
     rows = []
     for feature in features or FEATURE_COLUMNS:
@@ -420,234 +432,345 @@ def build_factor_registry(features: list[str] | None = None) -> pd.DataFrame:
 def add_features(df: pd.DataFrame, features: list[str] | None = None) -> pd.DataFrame:
     out = df.copy()
     g = out.groupby("symbol", group_keys=False, observed=True)
-    selected = set(features or FEATURE_COLUMNS)
-    if not selected:
+    selected_order = list(features or FEATURE_COLUMNS)
+    selected = set(selected_order)
+    if not selected_order:
         return out
 
     computed: dict[str, pd.Series] = {}
+    ret_cache: dict[int, pd.Series] = {}
+    ma_cache: dict[int, pd.Series] = {}
+    close_std_cache: dict[int, pd.Series] = {}
+    high_cache: dict[int, pd.Series] = {}
+    low_cache: dict[int, pd.Series] = {}
+    turnover_mean_cache: dict[int, pd.Series] = {}
+    turnover_std_cache: dict[int, pd.Series] = {}
+    amount_mean_cache: dict[int, pd.Series] = {}
+    amount_std_cache: dict[int, pd.Series] = {}
+    vol_cache: dict[int, pd.Series] = {}
+    atr_cache: dict[int, pd.Series] = {}
+    path_cache: dict[int, pd.Series] = {}
+    shifted_close_cache: dict[int, pd.Series] = {}
+    ta_close_wide_cache: pd.DataFrame | None = None
+    ta_close_indexer: pd.MultiIndex | None = None
+    ta_lib = None
+    ta_ma_cache: dict[int, pd.Series] = {}
+    ta_std_cache: dict[int, pd.Series] = {}
 
-    def put(name: str, value: pd.Series) -> None:
-        if name in selected:
-            computed[name] = value
+    daily_ret_cache: pd.Series | None = None
+    prev_close_cache: pd.Series | None = None
+    gap_1_cache: pd.Series | None = None
+    intraday_ret_1_cache: pd.Series | None = None
+    true_range_cache: pd.Series | None = None
+    abs_diff_cache: pd.Series | None = None
 
-    ret_1 = g["close"].pct_change(1)
-    ret_3 = g["close"].pct_change(3)
-    ret_5 = g["close"].pct_change(5)
-    ret_10 = g["close"].pct_change(10)
-    ret_20 = g["close"].pct_change(20)
-    ret_60 = g["close"].pct_change(60)
-    put("ret_1", ret_1)
-    put("ret_3", ret_3)
-    put("ret_5", ret_5)
-    put("ret_10", ret_10)
-    put("ret_20", ret_20)
-    put("ret_60", ret_60)
-
-    daily_ret = g["close"].pct_change()
-    vol_10 = daily_ret.groupby(out["symbol"], observed=True).rolling(10).std().reset_index(level=0, drop=True)
-    vol_20 = daily_ret.groupby(out["symbol"], observed=True).rolling(20).std().reset_index(level=0, drop=True)
-    vol_60 = daily_ret.groupby(out["symbol"], observed=True).rolling(60).std().reset_index(level=0, drop=True)
-    put("vol_10", vol_10)
-    put("vol_20", vol_20)
-
-    put(
-        "amp_5",
-        g["high"].rolling(5).max().reset_index(level=0, drop=True)
-        / g["low"].rolling(5).min().reset_index(level=0, drop=True)
-        - 1.0,
-    )
-    put(
-        "amp_20",
-        g["high"].rolling(20).max().reset_index(level=0, drop=True)
-        / g["low"].rolling(20).min().reset_index(level=0, drop=True)
-        - 1.0,
+    ma_feature_requested = any(
+        feature.startswith(("close_to_ma_", "trend_", "ma_spread_", "price_zscore_"))
+        for feature in selected_order
     )
 
-    turnover_5 = g["turnover_rate"].rolling(5).mean().reset_index(level=0, drop=True)
-    turnover_20 = g["turnover_rate"].rolling(20).mean().reset_index(level=0, drop=True)
-    put("turnover_5", turnover_5)
-    put("turnover_20", turnover_20)
-    amount_ma_5 = g["amount"].rolling(5).mean().reset_index(level=0, drop=True)
-    amount_ma_20 = g["amount"].rolling(20).mean().reset_index(level=0, drop=True)
-    put("amount_ratio_5_20", amount_ma_5 / amount_ma_20.replace(0, np.nan))
-    put("amount_ratio_1_20", out["amount"] / amount_ma_20.replace(0, np.nan) - 1.0)
+    def ta_close_wide() -> pd.DataFrame | None:
+        nonlocal ta_close_wide_cache, ta_close_indexer, ta_lib
+        if ta_talib is None or not ma_feature_requested:
+            return None
+        if ta_close_wide_cache is None:
+            ta_close_wide_cache = out.pivot(index="date", columns="symbol", values="close").sort_index(axis=0).sort_index(axis=1)
+            ta_close_indexer = pd.MultiIndex.from_arrays([out["date"].to_numpy(), out["symbol"].to_numpy()])
+            ta_lib = ta_talib.init(mode=2, skipna=False, to_globals=False)
+        return ta_close_wide_cache
 
-    ma_5 = g["close"].rolling(5).mean().reset_index(level=0, drop=True)
-    ma_8 = g["close"].rolling(8).mean().reset_index(level=0, drop=True)
-    ma_10 = g["close"].rolling(10).mean().reset_index(level=0, drop=True)
-    ma_13 = g["close"].rolling(13).mean().reset_index(level=0, drop=True)
-    ma_16 = g["close"].rolling(16).mean().reset_index(level=0, drop=True)
-    ma_20 = g["close"].rolling(20).mean().reset_index(level=0, drop=True)
-    ma_21 = g["close"].rolling(21).mean().reset_index(level=0, drop=True)
-    ma_32 = g["close"].rolling(32).mean().reset_index(level=0, drop=True)
-    ma_34 = g["close"].rolling(34).mean().reset_index(level=0, drop=True)
-    ma_48 = g["close"].rolling(48).mean().reset_index(level=0, drop=True)
-    ma_55 = g["close"].rolling(55).mean().reset_index(level=0, drop=True)
-    ma_60 = g["close"].rolling(60).mean().reset_index(level=0, drop=True)
-    ma_89 = g["close"].rolling(89).mean().reset_index(level=0, drop=True)
-    ma_120 = g["close"].rolling(120).mean().reset_index(level=0, drop=True)
-    close_std_20 = g["close"].rolling(20).std().reset_index(level=0, drop=True)
-    close_std_60 = g["close"].rolling(60).std().reset_index(level=0, drop=True)
-    close_std_120 = g["close"].rolling(120).std().reset_index(level=0, drop=True)
-    put("close_to_ma_5", out["close"] / ma_5 - 1.0)
-    put("close_to_ma_8", out["close"] / ma_8 - 1.0)
-    put("close_to_ma_10", out["close"] / ma_10 - 1.0)
-    put("close_to_ma_13", out["close"] / ma_13 - 1.0)
-    put("close_to_ma_16", out["close"] / ma_16 - 1.0)
-    put("close_to_ma_20", out["close"] / ma_20 - 1.0)
-    put("close_to_ma_21", out["close"] / ma_21 - 1.0)
-    put("close_to_ma_32", out["close"] / ma_32 - 1.0)
-    put("close_to_ma_34", out["close"] / ma_34 - 1.0)
-    put("close_to_ma_55", out["close"] / ma_55 - 1.0)
-    put("close_to_ma_60", out["close"] / ma_60 - 1.0)
-    put("close_to_ma_89", out["close"] / ma_89 - 1.0)
-    put("close_to_ma_120", out["close"] / ma_120 - 1.0)
+    def ta_series_from_matrix(values: np.ndarray, name: str) -> pd.Series:
+        assert ta_close_wide_cache is not None
+        assert ta_close_indexer is not None
+        long = (
+            pd.DataFrame(values, index=ta_close_wide_cache.index, columns=ta_close_wide_cache.columns)
+            .stack(future_stack=True)
+            .rename(name)
+        )
+        long.index = long.index.set_names(["date", "symbol"])
+        return long.reindex(ta_close_indexer).reset_index(drop=True)
 
-    prev_close = g["close"].shift(1)
-    gap_1 = out["open"] / prev_close.replace(0, np.nan) - 1.0
-    intraday_ret_1 = out["close"] / out["open"].replace(0, np.nan) - 1.0
-    overnight_ret_5 = gap_1.groupby(out["symbol"], observed=True).rolling(5).mean().reset_index(level=0, drop=True)
-    put("gap_1", gap_1)
-    put("intraday_ret_1", intraday_ret_1)
-    put("overnight_ret_5", overnight_ret_5)
-    put("trend_5_20", ma_5 / ma_20.replace(0, np.nan) - 1.0)
-    put("trend_5_13", ma_5 / ma_13.replace(0, np.nan) - 1.0)
-    put("trend_8_16", ma_8 / ma_16.replace(0, np.nan) - 1.0)
-    put("trend_8_21", ma_8 / ma_21.replace(0, np.nan) - 1.0)
-    put("trend_10_20", ma_10 / ma_20.replace(0, np.nan) - 1.0)
-    put("trend_5_34", ma_5 / ma_34.replace(0, np.nan) - 1.0)
-    put("trend_13_34", ma_13 / ma_34.replace(0, np.nan) - 1.0)
-    put("trend_13_55", ma_13 / ma_55.replace(0, np.nan) - 1.0)
-    put("trend_16_48", ma_16 / ma_48.replace(0, np.nan) - 1.0)
-    put("trend_20_60", ma_20 / ma_60.replace(0, np.nan) - 1.0)
-    put("trend_20_120", ma_20 / ma_120.replace(0, np.nan) - 1.0)
-    put("trend_21_55", ma_21 / ma_55.replace(0, np.nan) - 1.0)
-    put("trend_34_89", ma_34 / ma_89.replace(0, np.nan) - 1.0)
-    put("trend_55_120", ma_55 / ma_120.replace(0, np.nan) - 1.0)
-    put("ma_spread_5_20_60", (ma_5 - ma_20) / ma_60.replace(0, np.nan))
-    put("ma_spread_5_34_89", (ma_5 - ma_34) / ma_89.replace(0, np.nan))
-    put("ma_spread_8_21_55", (ma_8 - ma_21) / ma_55.replace(0, np.nan))
-    put("ma_spread_10_20_60", (ma_10 - ma_20) / ma_60.replace(0, np.nan))
-    put("ma_spread_13_34_89", (ma_13 - ma_34) / ma_89.replace(0, np.nan))
-    put("ma_spread_20_60_120", (ma_20 - ma_60) / ma_120.replace(0, np.nan))
-    put("vol_ratio_10_20", vol_10 / vol_20.replace(0, np.nan) - 1.0)
-    vol_5 = daily_ret.groupby(out["symbol"], observed=True).rolling(5).std().reset_index(level=0, drop=True)
-    put("vol_ratio_5_20", vol_5 / vol_20.replace(0, np.nan) - 1.0)
-    put("vol_ratio_20_60", vol_20 / vol_60.replace(0, np.nan) - 1.0)
-    put("turnover_ratio_5_20", turnover_5 / turnover_20.replace(0, np.nan) - 1.0)
+    def pct_return(window: int) -> pd.Series:
+        if window not in ret_cache:
+            ret_cache[window] = g["close"].pct_change(window)
+        return ret_cache[window]
 
-    rolling_high_16 = g["high"].rolling(16).max().reset_index(level=0, drop=True)
-    rolling_low_16 = g["low"].rolling(16).min().reset_index(level=0, drop=True)
-    channel_width_16 = (rolling_high_16 - rolling_low_16).replace(0, np.nan)
-    rolling_high_20 = g["high"].rolling(20).max().reset_index(level=0, drop=True)
-    rolling_low_20 = g["low"].rolling(20).min().reset_index(level=0, drop=True)
-    channel_width_20 = (rolling_high_20 - rolling_low_20).replace(0, np.nan)
-    put("channel_pos_16", (out["close"] - rolling_low_16) / channel_width_16 - 0.5)
-    put("channel_pos_20", (out["close"] - rolling_low_20) / channel_width_20 - 0.5)
-    put("close_to_high_16", out["close"] / rolling_high_16.replace(0, np.nan) - 1.0)
-    put("close_to_high_20", out["close"] / rolling_high_20.replace(0, np.nan) - 1.0)
-    put("close_to_low_16", out["close"] / rolling_low_16.replace(0, np.nan) - 1.0)
-    put("close_to_low_20", out["close"] / rolling_low_20.replace(0, np.nan) - 1.0)
-    rolling_high_60 = g["high"].rolling(60).max().reset_index(level=0, drop=True)
-    rolling_low_60 = g["low"].rolling(60).min().reset_index(level=0, drop=True)
-    rolling_high_120 = g["high"].rolling(120).max().reset_index(level=0, drop=True)
-    rolling_low_120 = g["low"].rolling(120).min().reset_index(level=0, drop=True)
-    channel_width_60 = (rolling_high_60 - rolling_low_60).replace(0, np.nan)
-    channel_width_120 = (rolling_high_120 - rolling_low_120).replace(0, np.nan)
-    put("channel_pos_60", (out["close"] - rolling_low_60) / channel_width_60 - 0.5)
-    put("channel_pos_120", (out["close"] - rolling_low_120) / channel_width_120 - 0.5)
-    put("breakout_ratio_20", (out["close"] - rolling_low_20) / channel_width_20)
-    put("breakout_ratio_60", (out["close"] - rolling_low_60) / channel_width_60)
-    put("breakout_ratio_120", (out["close"] - rolling_low_120) / channel_width_120)
-    put("distance_to_low_20", (out["close"] - rolling_low_20) / rolling_low_20.replace(0, np.nan))
-    put("distance_to_low_60", (out["close"] - rolling_low_60) / rolling_low_60.replace(0, np.nan))
-    put("distance_to_low_120", (out["close"] - rolling_low_120) / rolling_low_120.replace(0, np.nan))
-    put("distance_to_high_20", out["close"] / rolling_high_20.replace(0, np.nan) - 1.0)
-    put("distance_to_high_60", out["close"] / rolling_high_60.replace(0, np.nan) - 1.0)
-    put("distance_to_high_120", out["close"] / rolling_high_120.replace(0, np.nan) - 1.0)
-    put("price_zscore_20", (out["close"] - ma_20) / close_std_20.replace(0, np.nan))
-    put("price_zscore_60", (out["close"] - ma_60) / close_std_60.replace(0, np.nan))
-    put("price_zscore_120", (out["close"] - ma_120) / close_std_120.replace(0, np.nan))
-    put("range_pct_1", (out["high"] - out["low"]) / out["close"].replace(0, np.nan))
-    put("vol_compress_5_20", -(vol_10 / vol_20.replace(0, np.nan) - 1.0).abs())
-    put("vol_compress_10_60", -(vol_10 / vol_60.replace(0, np.nan) - 1.0).abs())
-    put("ret_reversal_5_20", ret_5 - ret_20)
-    put("ret_reversal_10_60", ret_10 - ret_60)
-    put("turnover_shock_1_20", out["turnover_rate"] / turnover_20.replace(0, np.nan) - 1.0)
-    turnover_60 = g["turnover_rate"].rolling(60).mean().reset_index(level=0, drop=True)
-    put("turnover_shock_5_60", turnover_5 / turnover_60.replace(0, np.nan) - 1.0)
-    put("turnover_ratio_5_60", turnover_5 / turnover_60.replace(0, np.nan) - 1.0)
-    put("turnover_ratio_20_60", turnover_20 / turnover_60.replace(0, np.nan) - 1.0)
-    put("price_volume_div_5", ret_5 - (amount_ma_5 / amount_ma_20.replace(0, np.nan) - 1.0))
-    amount_ma_60 = g["amount"].rolling(60).mean().reset_index(level=0, drop=True)
-    amount_std_20 = g["amount"].rolling(20).std().reset_index(level=0, drop=True)
-    amount_std_60 = g["amount"].rolling(60).std().reset_index(level=0, drop=True)
-    turnover_std_20 = g["turnover_rate"].rolling(20).std().reset_index(level=0, drop=True)
-    turnover_std_60 = g["turnover_rate"].rolling(60).std().reset_index(level=0, drop=True)
-    put("price_volume_div_20", ret_20 - (amount_ma_20 / amount_ma_60.replace(0, np.nan) - 1.0))
-    put("rebound_from_low_20", out["close"] / rolling_low_20.replace(0, np.nan) - 1.0 - ret_20)
-    put("amount_trend_5", amount_ma_5 / amount_ma_20.replace(0, np.nan) - 1.0)
-    put("amount_zscore_20", (out["amount"] - amount_ma_20) / amount_std_20.replace(0, np.nan))
-    put("amount_zscore_60", (out["amount"] - amount_ma_60) / amount_std_60.replace(0, np.nan))
-    put("turnover_zscore_20", (out["turnover_rate"] - turnover_20) / turnover_std_20.replace(0, np.nan))
-    put("turnover_zscore_60", (out["turnover_rate"] - turnover_60) / turnover_std_60.replace(0, np.nan))
+    def daily_ret() -> pd.Series:
+        nonlocal daily_ret_cache
+        if daily_ret_cache is None:
+            daily_ret_cache = g["close"].pct_change()
+        return daily_ret_cache
 
-    true_range = pd.concat(
-        [
-            out["high"] - out["low"],
-            (out["high"] - prev_close).abs(),
-            (out["low"] - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    atr_14 = true_range.groupby(out["symbol"], observed=True).rolling(14).mean().reset_index(level=0, drop=True)
-    atr_20 = true_range.groupby(out["symbol"], observed=True).rolling(20).mean().reset_index(level=0, drop=True)
-    atr_60 = true_range.groupby(out["symbol"], observed=True).rolling(60).mean().reset_index(level=0, drop=True)
-    put("atr_14", atr_14 / out["close"].replace(0, np.nan))
-    put("atr_20", atr_20 / out["close"].replace(0, np.nan))
-    put("atr_ratio_14_60", atr_14 / atr_60.replace(0, np.nan) - 1.0)
-    put("atr_ratio_20_60", atr_20 / atr_60.replace(0, np.nan) - 1.0)
+    def moving_average(window: int) -> pd.Series:
+        if window not in ma_cache:
+            wide = ta_close_wide()
+            if wide is not None and ta_lib is not None:
+                if window not in ta_ma_cache:
+                    ta_ma_cache[window] = ta_series_from_matrix(
+                        ta_lib.SMA(wide.to_numpy(dtype=float), timeperiod=window),
+                        f"ma_{window}",
+                    )
+                ma_cache[window] = ta_ma_cache[window]
+            else:
+                ma_cache[window] = g["close"].rolling(window).mean().reset_index(level=0, drop=True)
+        return ma_cache[window]
 
-    abs_diff = g["close"].diff().abs()
-    path_10 = abs_diff.groupby(out["symbol"], observed=True).rolling(10).sum().reset_index(level=0, drop=True)
-    path_20 = abs_diff.groupby(out["symbol"], observed=True).rolling(20).sum().reset_index(level=0, drop=True)
-    path_60 = abs_diff.groupby(out["symbol"], observed=True).rolling(60).sum().reset_index(level=0, drop=True)
-    put("efficiency_ratio_10", (out["close"] - g["close"].shift(10)).abs() / path_10.replace(0, np.nan))
-    put("efficiency_ratio_20", (out["close"] - g["close"].shift(20)).abs() / path_20.replace(0, np.nan))
-    put("efficiency_ratio_60", (out["close"] - g["close"].shift(60)).abs() / path_60.replace(0, np.nan))
+    def close_std(window: int) -> pd.Series:
+        if window not in close_std_cache:
+            wide = ta_close_wide()
+            if wide is not None and ta_lib is not None:
+                if window not in ta_std_cache:
+                    sample_scale = np.sqrt(window / max(window - 1, 1))
+                    ta_std_cache[window] = ta_series_from_matrix(
+                        ta_lib.STDDEV(wide.to_numpy(dtype=float), timeperiod=window) * sample_scale,
+                        f"std_{window}",
+                    )
+                close_std_cache[window] = ta_std_cache[window]
+            else:
+                close_std_cache[window] = g["close"].rolling(window).std().reset_index(level=0, drop=True)
+        return close_std_cache[window]
 
-    put("float_mv_log", np.log(out["float_mv"].clip(lower=1.0)))
+    def rolling_high(window: int) -> pd.Series:
+        if window not in high_cache:
+            high_cache[window] = g["high"].rolling(window).max().reset_index(level=0, drop=True)
+        return high_cache[window]
 
-    # Fundamental features are point-in-time fields already aligned in the panel.
-    put("value_earnings_yield", 1.0 / out["pe_ttm"].replace(0, np.nan))
-    put("value_book_to_price", 1.0 / out["pb"].replace(0, np.nan))
-    put("value_sales_yield", 1.0 / out["ps_ttm"].replace(0, np.nan))
-    put("value_dividend_yield", out["dv_ttm"])
+    def rolling_low(window: int) -> pd.Series:
+        if window not in low_cache:
+            low_cache[window] = g["low"].rolling(window).min().reset_index(level=0, drop=True)
+        return low_cache[window]
 
-    put("quality_roe", out["roe"])
-    put("quality_roe_dt", out["roe_dt"])
-    put("quality_roa", out["roa"])
-    put("quality_roic", out["roic"])
-    put("quality_grossprofit_margin", out["grossprofit_margin"])
-    put("quality_netprofit_margin", out["netprofit_margin"])
-    put("quality_ocfps", out["ocfps"])
-    put("quality_cfps", out["cfps"])
-    put("quality_profit_dedt_to_mv", out["profit_dedt"] / out["float_mv"].replace(0, np.nan))
+    def turnover_mean(window: int) -> pd.Series:
+        if window not in turnover_mean_cache:
+            turnover_mean_cache[window] = g["turnover_rate"].rolling(window).mean().reset_index(level=0, drop=True)
+        return turnover_mean_cache[window]
 
-    put("leverage_debt_to_assets", -out["debt_to_assets"])
-    put("solvency_current_ratio", out["current_ratio"])
-    put("solvency_quick_ratio", out["quick_ratio"])
+    def turnover_std(window: int) -> pd.Series:
+        if window not in turnover_std_cache:
+            turnover_std_cache[window] = g["turnover_rate"].rolling(window).std().reset_index(level=0, drop=True)
+        return turnover_std_cache[window]
 
-    put("growth_basic_eps_yoy", out["basic_eps_yoy"])
-    put("growth_dt_eps_yoy", out["dt_eps_yoy"])
-    put("growth_netprofit_yoy", out["netprofit_yoy"])
-    put("growth_dt_netprofit_yoy", out["dt_netprofit_yoy"])
-    put("growth_ocf_yoy", out["ocf_yoy"])
-    put("growth_revenue_yoy", out["tr_yoy"])
-    put("growth_operating_revenue_yoy", out["or_yoy"])
-    put("growth_q_sales_yoy", out["q_sales_yoy"])
-    put("growth_q_op_qoq", out["q_op_qoq"])
+    def amount_mean(window: int) -> pd.Series:
+        if window not in amount_mean_cache:
+            amount_mean_cache[window] = g["amount"].rolling(window).mean().reset_index(level=0, drop=True)
+        return amount_mean_cache[window]
 
-    feature_frame = pd.DataFrame(computed, index=out.index)
+    def amount_std(window: int) -> pd.Series:
+        if window not in amount_std_cache:
+            amount_std_cache[window] = g["amount"].rolling(window).std().reset_index(level=0, drop=True)
+        return amount_std_cache[window]
+
+    def volatility(window: int) -> pd.Series:
+        if window not in vol_cache:
+            vol_cache[window] = daily_ret().groupby(out["symbol"], observed=True).rolling(window).std().reset_index(level=0, drop=True)
+        return vol_cache[window]
+
+    def shifted_close(window: int) -> pd.Series:
+        if window not in shifted_close_cache:
+            shifted_close_cache[window] = g["close"].shift(window)
+        return shifted_close_cache[window]
+
+    def previous_close() -> pd.Series:
+        nonlocal prev_close_cache
+        if prev_close_cache is None:
+            prev_close_cache = shifted_close(1)
+        return prev_close_cache
+
+    def gap_1() -> pd.Series:
+        nonlocal gap_1_cache
+        if gap_1_cache is None:
+            gap_1_cache = out["open"] / previous_close().replace(0, np.nan) - 1.0
+        return gap_1_cache
+
+    def intraday_ret_1() -> pd.Series:
+        nonlocal intraday_ret_1_cache
+        if intraday_ret_1_cache is None:
+            intraday_ret_1_cache = out["close"] / out["open"].replace(0, np.nan) - 1.0
+        return intraday_ret_1_cache
+
+    def true_range() -> pd.Series:
+        nonlocal true_range_cache
+        if true_range_cache is None:
+            true_range_cache = pd.concat(
+                [
+                    out["high"] - out["low"],
+                    (out["high"] - previous_close()).abs(),
+                    (out["low"] - previous_close()).abs(),
+                ],
+                axis=1,
+            ).max(axis=1)
+        return true_range_cache
+
+    def atr(window: int) -> pd.Series:
+        if window not in atr_cache:
+            atr_cache[window] = true_range().groupby(out["symbol"], observed=True).rolling(window).mean().reset_index(level=0, drop=True)
+        return atr_cache[window]
+
+    def abs_diff() -> pd.Series:
+        nonlocal abs_diff_cache
+        if abs_diff_cache is None:
+            abs_diff_cache = g["close"].diff().abs()
+        return abs_diff_cache
+
+    def path_sum(window: int) -> pd.Series:
+        if window not in path_cache:
+            path_cache[window] = abs_diff().groupby(out["symbol"], observed=True).rolling(window).sum().reset_index(level=0, drop=True)
+        return path_cache[window]
+
+    def channel_width(window: int) -> pd.Series:
+        return (rolling_high(window) - rolling_low(window)).replace(0, np.nan)
+
+    fundamental_values = {
+        "value_earnings_yield": lambda: 1.0 / out["pe_ttm"].replace(0, np.nan),
+        "value_book_to_price": lambda: 1.0 / out["pb"].replace(0, np.nan),
+        "value_sales_yield": lambda: 1.0 / out["ps_ttm"].replace(0, np.nan),
+        "value_dividend_yield": lambda: out["dv_ttm"],
+        "quality_roe": lambda: out["roe"],
+        "quality_roe_dt": lambda: out["roe_dt"],
+        "quality_roa": lambda: out["roa"],
+        "quality_roic": lambda: out["roic"],
+        "quality_grossprofit_margin": lambda: out["grossprofit_margin"],
+        "quality_netprofit_margin": lambda: out["netprofit_margin"],
+        "quality_ocfps": lambda: out["ocfps"],
+        "quality_cfps": lambda: out["cfps"],
+        "quality_profit_dedt_to_mv": lambda: out["profit_dedt"] / out["float_mv"].replace(0, np.nan),
+        "leverage_debt_to_assets": lambda: -out["debt_to_assets"],
+        "solvency_current_ratio": lambda: out["current_ratio"],
+        "solvency_quick_ratio": lambda: out["quick_ratio"],
+        "growth_basic_eps_yoy": lambda: out["basic_eps_yoy"],
+        "growth_dt_eps_yoy": lambda: out["dt_eps_yoy"],
+        "growth_netprofit_yoy": lambda: out["netprofit_yoy"],
+        "growth_dt_netprofit_yoy": lambda: out["dt_netprofit_yoy"],
+        "growth_ocf_yoy": lambda: out["ocf_yoy"],
+        "growth_revenue_yoy": lambda: out["tr_yoy"],
+        "growth_operating_revenue_yoy": lambda: out["or_yoy"],
+        "growth_q_sales_yoy": lambda: out["q_sales_yoy"],
+        "growth_q_op_qoq": lambda: out["q_op_qoq"],
+    }
+
+    for feature in selected_order:
+        if feature in computed:
+            continue
+        if feature in fundamental_values:
+            computed[feature] = fundamental_values[feature]()
+            continue
+        if match := re.fullmatch(r"ret_(\d+)", feature):
+            computed[feature] = pct_return(int(match.group(1)))
+            continue
+        if match := re.fullmatch(r"close_to_ma_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = out["close"] / moving_average(window) - 1.0
+            continue
+        if match := re.fullmatch(r"trend_(\d+)_(\d+)", feature):
+            fast, slow = (int(group) for group in match.groups())
+            computed[feature] = moving_average(fast) / moving_average(slow).replace(0, np.nan) - 1.0
+            continue
+        if match := re.fullmatch(r"ma_spread_(\d+)_(\d+)_(\d+)", feature):
+            fast, mid, slow = (int(group) for group in match.groups())
+            computed[feature] = (moving_average(fast) - moving_average(mid)) / moving_average(slow).replace(0, np.nan)
+            continue
+        if match := re.fullmatch(r"vol_(\d+)", feature):
+            computed[feature] = volatility(int(match.group(1)))
+            continue
+        if match := re.fullmatch(r"amp_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = rolling_high(window) / rolling_low(window).replace(0, np.nan) - 1.0
+            continue
+        if match := re.fullmatch(r"turnover_(\d+)", feature):
+            computed[feature] = turnover_mean(int(match.group(1)))
+            continue
+        if match := re.fullmatch(r"ret_reversal_(\d+)_(\d+)", feature):
+            fast, slow = (int(group) for group in match.groups())
+            computed[feature] = pct_return(fast) - pct_return(slow)
+            continue
+        if match := re.fullmatch(r"vol_ratio_(\d+)_(\d+)", feature):
+            fast, slow = (int(group) for group in match.groups())
+            computed[feature] = volatility(fast) / volatility(slow).replace(0, np.nan) - 1.0
+            continue
+        if match := re.fullmatch(r"turnover_ratio_(\d+)_(\d+)", feature):
+            fast, slow = (int(group) for group in match.groups())
+            computed[feature] = turnover_mean(fast) / turnover_mean(slow).replace(0, np.nan) - 1.0
+            continue
+        if match := re.fullmatch(r"channel_pos_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = (out["close"] - rolling_low(window)) / channel_width(window) - 0.5
+            continue
+        if match := re.fullmatch(r"close_to_high_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = out["close"] / rolling_high(window).replace(0, np.nan) - 1.0
+            continue
+        if match := re.fullmatch(r"close_to_low_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = out["close"] / rolling_low(window).replace(0, np.nan) - 1.0
+            continue
+        if match := re.fullmatch(r"distance_to_high_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = out["close"] / rolling_high(window).replace(0, np.nan) - 1.0
+            continue
+        if match := re.fullmatch(r"distance_to_low_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = (out["close"] - rolling_low(window)) / rolling_low(window).replace(0, np.nan)
+            continue
+        if match := re.fullmatch(r"price_zscore_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = (out["close"] - moving_average(window)) / close_std(window).replace(0, np.nan)
+            continue
+        if match := re.fullmatch(r"efficiency_ratio_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = (out["close"] - shifted_close(window)).abs() / path_sum(window).replace(0, np.nan)
+            continue
+        if match := re.fullmatch(r"atr_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = atr(window) / out["close"].replace(0, np.nan)
+            continue
+        if match := re.fullmatch(r"atr_ratio_(\d+)_(\d+)", feature):
+            fast, slow = (int(group) for group in match.groups())
+            computed[feature] = atr(fast) / atr(slow).replace(0, np.nan) - 1.0
+            continue
+        if match := re.fullmatch(r"breakout_ratio_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = (out["close"] - rolling_low(window)) / channel_width(window)
+            continue
+        if match := re.fullmatch(r"amount_zscore_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = (out["amount"] - amount_mean(window)) / amount_std(window).replace(0, np.nan)
+            continue
+        if match := re.fullmatch(r"turnover_zscore_(\d+)", feature):
+            window = int(match.group(1))
+            computed[feature] = (out["turnover_rate"] - turnover_mean(window)) / turnover_std(window).replace(0, np.nan)
+            continue
+
+        if feature == "amount_ratio_5_20":
+            computed[feature] = amount_mean(5) / amount_mean(20).replace(0, np.nan)
+        elif feature == "amount_ratio_1_20":
+            computed[feature] = out["amount"] / amount_mean(20).replace(0, np.nan) - 1.0
+        elif feature == "gap_1":
+            computed[feature] = gap_1()
+        elif feature == "intraday_ret_1":
+            computed[feature] = intraday_ret_1()
+        elif feature == "overnight_ret_5":
+            computed[feature] = gap_1().groupby(out["symbol"], observed=True).rolling(5).mean().reset_index(level=0, drop=True)
+        elif feature == "range_pct_1":
+            computed[feature] = (out["high"] - out["low"]) / out["close"].replace(0, np.nan)
+        elif feature == "vol_compress_5_20":
+            computed[feature] = -(volatility(10) / volatility(20).replace(0, np.nan) - 1.0).abs()
+        elif feature == "vol_compress_10_60":
+            computed[feature] = -(volatility(10) / volatility(60).replace(0, np.nan) - 1.0).abs()
+        elif feature == "turnover_shock_1_20":
+            computed[feature] = out["turnover_rate"] / turnover_mean(20).replace(0, np.nan) - 1.0
+        elif feature == "turnover_shock_5_60":
+            computed[feature] = turnover_mean(5) / turnover_mean(60).replace(0, np.nan) - 1.0
+        elif feature == "price_volume_div_5":
+            computed[feature] = pct_return(5) - (amount_mean(5) / amount_mean(20).replace(0, np.nan) - 1.0)
+        elif feature == "price_volume_div_20":
+            computed[feature] = pct_return(20) - (amount_mean(20) / amount_mean(60).replace(0, np.nan) - 1.0)
+        elif feature == "rebound_from_low_20":
+            computed[feature] = out["close"] / rolling_low(20).replace(0, np.nan) - 1.0 - pct_return(20)
+        elif feature == "amount_trend_5":
+            computed[feature] = amount_mean(5) / amount_mean(20).replace(0, np.nan) - 1.0
+        elif feature == "float_mv_log":
+            computed[feature] = np.log(out["float_mv"].clip(lower=1.0))
+
+    feature_frame = pd.DataFrame({name: computed[name] for name in selected_order if name in computed}, index=out.index)
     feature_frame = feature_frame.astype("float32")
     return pd.concat([out, feature_frame], axis=1)

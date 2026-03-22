@@ -8,9 +8,8 @@ END_DATE ?=
 RESEARCH_START ?= 2020-01-01
 RESEARCH_END ?= 2026-03-20
 TRAIN_MONTHS ?= 36
-VALID_MONTHS ?= 12
-TEST_MONTHS ?= 12
-STEP_MONTHS ?= 12
+TEST_MONTHS ?= 3
+STEP_MONTHS ?= 3
 LOOKBACK_DAYS ?= 7
 
 .PHONY: help install run research-run factor-chain single-factor family-sma family-reversal export-panel update-raw update-index-weight update-index-daily daily-research check-daily status snapshot summary factor-registry-check
@@ -20,7 +19,7 @@ help:
 	'Available targets:' \
 	'  make install              Install the project into .venv' \
 	'  make run                  Run the default pipeline' \
-	'  make research-run         Run rolling train/valid/test research' \
+	'  make research-run         Run rolling 5y factor-mining + 3y train + 3m test research' \
 	'  make factor-chain         Run factor-chain feature screening' \
 	'  make single-factor        Run single-factor diagnostics' \
 	'  make family-sma           Run the SMA factor family lab' \
@@ -45,13 +44,13 @@ run:
 research-run:
 	$(AQT) research-run --input $(INPUT) --output-dir $(OUTPUT_DIR) \
 		--research-start $(RESEARCH_START) --research-end $(RESEARCH_END) \
-		--train-months $(TRAIN_MONTHS) --valid-months $(VALID_MONTHS) \
+		--train-months $(TRAIN_MONTHS) \
 		--test-months $(TEST_MONTHS) --step-months $(STEP_MONTHS)
 
 factor-chain:
 	$(AQT) factor-chain-run --input $(INPUT) --output-dir $(OUTPUT_DIR) \
 		--research-start $(RESEARCH_START) --research-end $(RESEARCH_END) \
-		--train-months $(TRAIN_MONTHS) --valid-months $(VALID_MONTHS) \
+		--train-months $(TRAIN_MONTHS) \
 		--test-months $(TEST_MONTHS) --step-months $(STEP_MONTHS)
 
 single-factor:
